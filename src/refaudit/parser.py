@@ -32,3 +32,16 @@ def extract_doi(text: str) -> str | None:
         return None
     doi = m.group(1).rstrip(").,;")
     return doi
+
+
+def extract_title_candidate(ref_line: str) -> str | None:
+    # Heuristic: title is often the segment after authors, before journal.
+    # Split by period and pick the first sufficiently long segment.
+    if not ref_line:
+        return None
+    parts = [p.strip() for p in ref_line.split(".")]
+    parts = [p for p in parts if p]
+    for seg in parts[:4]:
+        if len(seg) >= 15:  # avoid author initials or very short tokens
+            return seg
+    return parts[1] if len(parts) > 1 else (parts[0] if parts else None)

@@ -9,6 +9,8 @@ import unicodedata
 
 import requests
 from dotenv import load_dotenv
+from .parser import extract_title_candidate
+from .pubmed import PubMedClient
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
@@ -28,6 +30,7 @@ class MatchResult:
     retraction_details: list[dict]
     method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
     note: str | None = None    # reason/hint when not found
+    candidates: list[dict] | None = None  # optional debug candidates
 
 
 def _normalize_text(s: str) -> str:
@@ -60,11 +63,12 @@ def _title_matches_strict(ref_line: str, candidate_title: str) -> bool:
 
 
 class CrossrefClient:
-    def __init__(self, pause_sec: float = 0.2, strict: bool = True):
+    def __init__(self, pause_sec: float = 0.2, strict: bool = True, debug: bool = False):
         self.session = requests.Session()
         self.session.headers.update(UA)
         self.pause_sec = pause_sec
         self.strict = strict
+        self.debug = debug
 
     def _get(self, url: str, params: dict | None = None):
         try:
@@ -156,6 +160,43 @@ class CrossrefClient:
                     break
 
         if not work:
+            # Fallback: try PubMed exact title match when Crossref has no hit
+            title_guess = extract_title_candidate(input_text) or ""
+            if title_guess:
+                pm = PubMedClient()
+                pm_hits = pm.search_title_exact(title_guess)
+                chosen = None
+                for hit in pm_hits:
+                    if _normalize_text(hit.title) == _normalize_text(title_guess):
+                        chosen = hit
+                        break
+                if chosen:
+                    retracted, details = (False, [])
+                    if chosen.doi:
+                        retracted, details = self.is_retracted(chosen.doi)
+                    return MatchResult(
+                        input_text,
+                        chosen.doi,
+                        chosen.title,
+                        found=True,
+                        retracted=retracted,
+                        retraction_details=details,
+                        method="pubmed-title",
+                        note=None,
+                        candidates=None,
+                    )
+            cands = None
+            if self.debug:
+                # collect top 3 candidates for troubleshooting
+                cands = []
+                for cand in self.search_bibliographic_items(input_text, rows=3):
+                    cands.append({
+                        "DOI": cand.get("DOI"),
+                        "title": (cand.get("title") or [None])[0],
+                        "year": (cand.get("published-print") or cand.get("issued") or {}).get("date-parts", [[None]])[0][0],
+                        "container": (cand.get("container-title") or [None])[0],
+                        "page": cand.get("page"),
+                    })
             return MatchResult(
                 input_text,
                 None,
@@ -165,6 +206,7 @@ class CrossrefClient:
                 retraction_details=[],
                 method=method,
                 note="no_match",
+                candidates=cands,
             )
 
         # If strict (and not direct DOI), enforce title and year checks
@@ -179,6 +221,7 @@ class CrossrefClient:
                 retraction_details=[],
                 method=method,
                 note="title_mismatch",
+                candidates=None,
             )
 
         ref_year = _extract_year(input_text)
@@ -204,6 +247,7 @@ class CrossrefClient:
                 retraction_details=[],
                 method=method,
                 note="year_mismatch",
+                candidates=None,
             )
 
         doi = work.get("DOI")
@@ -217,4 +261,5 @@ class CrossrefClient:
             retraction_details=details,
             method=method,
             note=None,
+            candidates=None,
         )

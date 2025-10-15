@@ -18,13 +18,28 @@ def _section_bad(r: MatchResult) -> list[str]:
             reason += "（タイトル不一致）"
         if r.note == "year_mismatch":
             reason += "（年不一致）"
-        return [
+        lines = [
             "## ❌ 未発見",
             "",
             f"- 入力: `{r.input_text}`",
             f"- 理由: {reason}",
             "",
         ]
+        if r.candidates:
+            lines += [
+                "### Crossref候補（上位3件）",
+            ]
+            for c in r.candidates:
+                y = c.get("year")
+                y = y if y is not None else "N/A"
+                cont = c.get("container") or ""
+                page = c.get("page") or ""
+                lines += [
+                    f"- {y} {cont} {page} — {c.get('title')}",
+                    f"  DOI: `{c.get('DOI')}`",
+                ]
+            lines.append("")
+        return lines
     # retracted
     lines = [
         "## 🚩 撤回・撤回相当（Crossref 更新通知）",

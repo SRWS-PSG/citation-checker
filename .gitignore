@@ -25,6 +25,6 @@ build/
 .coverage
 .python-version
 
-outputs/*
+outputs/
 !outputs/.gitkeep 
 
