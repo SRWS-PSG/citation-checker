@@ -33,9 +33,30 @@ class MatchResult:
     candidates: list[dict] | None = None  # optional debug candidates
 
 
+_SYNONYMS = [
+    (r"\bcaeserean\b", "cesarean"),
+    (r"\bcaesarean\b", "cesarean"),
+    (r"\banaesthesia\b", "anesthesia"),
+    (r"\banaesthetic\b", "anesthetic"),
+    (r"\bhaemodynamics?\b", "hemodynamic"),
+    (r"\bhaemoglobin\b", "hemoglobin"),
+    (r"\bfoetus\b", "fetus"),
+    (r"\bfoetal\b", "fetal"),
+    (r"\brandomised\b", "randomized"),
+]
+
+
+def _apply_synonyms(s: str) -> str:
+    out = s
+    for pat, rep in _SYNONYMS:
+        out = re.sub(pat, rep, out)
+    return out
+
+
 def _normalize_text(s: str) -> str:
     s = unicodedata.normalize("NFKC", s or "").lower()
     s = re.sub(r"\s+", " ", s)
+    s = _apply_synonyms(s)
     # remove punctuation-like characters but keep spaces and alnum
     s = re.sub(r"[^\w\s]", "", s)
     return re.sub(r"\s+", " ", s).strip()
