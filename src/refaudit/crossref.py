@@ -4,6 +4,8 @@ import os
 import time
 import urllib.parse
 from dataclasses import dataclass
+import re
+import unicodedata
 
 import requests
 from dotenv import load_dotenv
@@ -24,13 +26,47 @@ class MatchResult:
     found: bool
     retracted: bool
     retraction_details: list[dict]
+    method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
+    note: str | None = None    # reason/hint when not found
+    method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
+    note: str | None = None    # reason/hint when not found
+
+
+def _normalize_text(s: str) -> str:
+    s = unicodedata.normalize("NFKC", s or "").lower()
+    s = re.sub(r"\s+", " ", s)
+    # remove punctuation-like characters but keep spaces and alnum
+    s = re.sub(r"[^\w\s]", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _extract_year(text: str) -> int | None:
+    m = re.search(r"\b(19|20)\d{2}\b", text)
+    return int(m.group(0)) if m else None
+
+
+def _title_matches_strict(ref_line: str, candidate_title: str) -> bool:
+    ref_n = _normalize_text(ref_line)
+    tit_n = _normalize_text(candidate_title or "")
+    if not tit_n:
+        return False
+    # exact-ish: title substring contained either way
+    if tit_n in ref_n or ref_n in tit_n:
+        return True
+    # fallback: require high token overlap (all candidate tokens appear in ref)
+    tit_tokens = [t for t in tit_n.split() if len(t) > 2]
+    if not tit_tokens:
+        return False
+    missing = [t for t in tit_tokens if t not in ref_n]
+    return len(missing) == 0
 
 
 class CrossrefClient:
-    def __init__(self, pause_sec: float = 0.2):
+    def __init__(self, pause_sec: float = 0.2, strict: bool = True):
         self.session = requests.Session()
         self.session.headers.update(UA)
         self.pause_sec = pause_sec
+        self.strict = strict
 
     def _get(self, url: str, params: dict | None = None):
         try:
@@ -43,16 +79,20 @@ class CrossrefClient:
             return None
 
     def search_bibliographic(self, ref: str) -> dict | None:
+        # Backward compatible: return top item if any
+        items = self.search_bibliographic_items(ref)
+        return items[0] if items else None
+
+    def search_bibliographic_items(self, ref: str, rows: int = 5) -> list[dict]:
         params = {
             "query.bibliographic": ref,
-            "rows": 3,
+            "rows": rows,
             "select": "DOI,title,issued,type",
         }
         js = self._get(API, params)
         if not js:
-            return None
-        items = js.get("message", {}).get("items", [])
-        return items[0] if items else None
+            return []
+        return js.get("message", {}).get("items", [])
 
     def get_work(self, doi: str) -> dict | None:
         url = f"{API}/{urllib.parse.quote(doi)}"
@@ -93,16 +133,83 @@ class CrossrefClient:
         from .parser import extract_doi
 
         doi = extract_doi(input_text)
-        work = self.get_work(doi) if doi else self.search_bibliographic(input_text)
+        work = None
+        method: str | None = None
+        if doi:
+            method = "doi"
+            work = self.get_work(doi)
+            if not work:
+                # Fallback to bibliographic match when direct DOI lookup fails
+                method = "doi->bibliographic"
+                # Try multiple candidates and choose strict match if enabled
+                for cand in self.search_bibliographic_items(input_text):
+                    title = (cand.get("title") or [None])[0]
+                    if not self.strict or _title_matches_strict(input_text, title):
+                        work = cand
+                        break
+        else:
+            method = "bibliographic"
+            # Try multiple candidates and pick first strict match if required
+            for cand in self.search_bibliographic_items(input_text):
+                title = (cand.get("title") or [None])[0]
+                if not self.strict or _title_matches_strict(input_text, title):
+                    work = cand
+                    break
 
         if not work:
             return MatchResult(
-                input_text, None, None, found=False, retracted=False, retraction_details=[]
+                input_text,
+                None,
+                None,
+                found=False,
+                retracted=False,
+                retraction_details=[],
+                method=method,
+                note="no_match",
+            )
+
+        # If strict, enforce year equality when reference mentions a year
+        title = (work.get("title") or [None])[0]
+        if self.strict and title and not _title_matches_strict(input_text, title):
+            return MatchResult(
+                input_text,
+                None,
+                None,
+                found=False,
+                retracted=False,
+                retraction_details=[],
+                method=method,
+                note="title_mismatch",
+            )
+
+        ref_year = _extract_year(input_text)
+        work_year = None
+        issued = work.get("issued", {})
+        if isinstance(issued, dict):
+            parts = issued.get("date-parts") or []
+            if parts and parts[0]:
+                work_year = parts[0][0]
+        if self.strict and ref_year and work_year and ref_year != work_year:
+            return MatchResult(
+                input_text,
+                None,
+                None,
+                found=False,
+                retracted=False,
+                retraction_details=[],
+                method=method,
+                note="year_mismatch",
             )
 
         doi = work.get("DOI")
-        title = (work.get("title") or [None])[0]
         retracted, details = self.is_retracted(doi)
         return MatchResult(
-            input_text, doi, title, found=True, retracted=retracted, retraction_details=details
+            input_text,
+            doi,
+            title,
+            found=True,
+            retracted=retracted,
+            retraction_details=details,
+            method=method,
+            note=None,
         )
