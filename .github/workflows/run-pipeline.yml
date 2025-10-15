@@ -1,6 +1,11 @@
 name: Run Ref Audit
 on:
   workflow_dispatch:
+    inputs:
+      path:
+        description: "Path to references file"
+        required: false
+        default: "input/references.txt"
   push:
     paths:
       - "input/references.txt"
@@ -31,7 +36,10 @@ jobs:
         fi
     - name: Run audit
       run: |
-        python -m refaudit.main --text "$(cat input/references.txt)" --out outputs/report.md
+        REF_PATH="${{ inputs.path }}"
+        if [ -z "$REF_PATH" ]; then REF_PATH="input/references.txt"; fi
+        echo "Using references from: $REF_PATH"
+        python -m refaudit.main --text "$(cat "$REF_PATH")" --out outputs/report.md
         echo "=== outputs/report.md ==="
         sed -n '1,120p' outputs/report.md
     - name: Commit report

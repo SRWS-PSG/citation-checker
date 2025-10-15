@@ -33,10 +33,14 @@ class CrossrefClient:
         self.pause_sec = pause_sec
 
     def _get(self, url: str, params: dict | None = None):
-        r = self.session.get(url, params=params, timeout=30)
-        r.raise_for_status()
-        time.sleep(self.pause_sec)
-        return r.json()
+        try:
+            r = self.session.get(url, params=params, timeout=30)
+            r.raise_for_status()
+            time.sleep(self.pause_sec)
+            return r.json()
+        except requests.RequestException:
+            # Network/API failure: degrade gracefully so pipeline can complete
+            return None
 
     def search_bibliographic(self, ref: str) -> dict | None:
         params = {
@@ -45,12 +49,16 @@ class CrossrefClient:
             "select": "DOI,title,issued,type",
         }
         js = self._get(API, params)
+        if not js:
+            return None
         items = js.get("message", {}).get("items", [])
         return items[0] if items else None
 
     def get_work(self, doi: str) -> dict | None:
         url = f"{API}/{urllib.parse.quote(doi)}"
         js = self._get(url, params={"select": "DOI,title,issued,type,update-to,relation"})
+        if not js:
+            return None
         return js.get("message", None)
 
     def find_updates_for(self, doi: str) -> list[dict]:
@@ -59,6 +67,8 @@ class CrossrefClient:
             "rows": 1000,
         }
         js = self._get(API, params)
+        if not js:
+            return []
         return js.get("message", {}).get("items", [])
 
     def is_retracted(self, doi: str) -> tuple[bool, list[dict]]:
@@ -96,4 +106,3 @@ class CrossrefClient:
         return MatchResult(
             input_text, doi, title, found=True, retracted=retracted, retraction_details=details
         )
-
