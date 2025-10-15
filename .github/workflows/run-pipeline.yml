@@ -1,0 +1,31 @@
+name: Run Ref Audit
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "input/references.txt"
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - run: python -m pip install -e .
+    - name: Create .env
+      run: |
+        echo "CONTACT_EMAIL=${{ secrets.CONTACT_EMAIL }}" > .env
+    - name: Run audit
+      run: |
+        python -m refaudit.main --text "$(cat input/references.txt)" --out outputs/report.md
+        echo "=== outputs/report.md ==="
+        sed -n '1,120p' outputs/report.md
+    - name: Commit report
+      uses: stefanzweifel/git-auto-commit-action@v5
+      with:
+        commit_message: "chore: update report.md"
+        file_pattern: outputs/report.md
+
