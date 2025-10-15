@@ -12,6 +12,7 @@ def split_references(pasted_text: str) -> list[str]:
         "pubmed central",
         "google scholar",
         "cas",
+        "references",
     }
     for raw in (pasted_text or "").splitlines():
         line = raw.strip()

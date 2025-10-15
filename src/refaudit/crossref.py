@@ -28,8 +28,6 @@ class MatchResult:
     retraction_details: list[dict]
     method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
     note: str | None = None    # reason/hint when not found
-    method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
-    note: str | None = None    # reason/hint when not found
 
 
 def _normalize_text(s: str) -> str:
@@ -87,7 +85,7 @@ class CrossrefClient:
         params = {
             "query.bibliographic": ref,
             "rows": rows,
-            "select": "DOI,title,issued,type",
+            "select": "DOI,title,issued,published-print,published-online,container-title,volume,issue,page,type",
         }
         js = self._get(API, params)
         if not js:
@@ -96,7 +94,8 @@ class CrossrefClient:
 
     def get_work(self, doi: str) -> dict | None:
         url = f"{API}/{urllib.parse.quote(doi)}"
-        js = self._get(url, params={"select": "DOI,title,issued,type,update-to,relation"})
+        # 'select' is not supported on works/{doi}; fetch full and pick fields
+        js = self._get(url, params=None)
         if not js:
             return None
         return js.get("message", None)
@@ -168,9 +167,9 @@ class CrossrefClient:
                 note="no_match",
             )
 
-        # If strict, enforce year equality when reference mentions a year
+        # If strict (and not direct DOI), enforce title and year checks
         title = (work.get("title") or [None])[0]
-        if self.strict and title and not _title_matches_strict(input_text, title):
+        if self.strict and method != "doi" and title and not _title_matches_strict(input_text, title):
             return MatchResult(
                 input_text,
                 None,
@@ -184,12 +183,18 @@ class CrossrefClient:
 
         ref_year = _extract_year(input_text)
         work_year = None
-        issued = work.get("issued", {})
-        if isinstance(issued, dict):
-            parts = issued.get("date-parts") or []
-            if parts and parts[0]:
-                work_year = parts[0][0]
-        if self.strict and ref_year and work_year and ref_year != work_year:
+        # Prefer published-print year if available, else issued, else published-online
+        def year_from(field: str) -> int | None:
+            obj = work.get(field, {})
+            if isinstance(obj, dict):
+                parts = obj.get("date-parts") or []
+                if parts and parts[0]:
+                    return parts[0][0]
+            return None
+
+        work_year = year_from("published-print") or year_from("issued") or year_from("published-online")
+
+        if self.strict and method != "doi" and ref_year and work_year and ref_year != work_year:
             return MatchResult(
                 input_text,
                 None,
