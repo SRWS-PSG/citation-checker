@@ -4,7 +4,6 @@ import os
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
-from typing import Iterable
 
 import requests
 from dotenv import load_dotenv

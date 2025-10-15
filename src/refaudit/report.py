@@ -80,8 +80,7 @@ def make_markdown_bad_only(results: Iterable[MatchResult]) -> str:
 
 
 def make_markdown_full(results: Iterable[MatchResult]) -> str:
-    total = len(list(results))
-    # Recompute because we consumed iterator
+    # Materialize once to avoid consuming an iterator multiple times
     results = list(results)
     bad = [r for r in results if (not r.found) or r.retracted]
     ok = [r for r in results if r.found and not r.retracted]

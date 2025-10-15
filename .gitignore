@@ -1,5 +1,6 @@
 # Virtualenv
 .venv/
+.venv-*/
 
 # Environment files
 .env
