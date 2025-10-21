@@ -31,6 +31,7 @@ class MatchResult:
     method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
     note: str | None = None    # reason/hint when not found
     candidates: list[dict] | None = None  # optional debug candidates
+    suggestions: list[str] | None = None  # follow-up actions for operators
 
 
 _SYNONYMS = [
@@ -207,6 +208,12 @@ class CrossrefClient:
                         candidates=None,
                     )
             cands = None
+            suggestions: list[str] = []
+            if title_guess:
+                suggestions.append(f"タイトル候補でウェブ検索: \"{title_guess}\"")
+                search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(title_guess)
+                suggestions.append(f"Google検索: {search_url}")
+            suggestions = suggestions or None
             if self.debug:
                 # collect top 3 candidates for troubleshooting
                 cands = []
@@ -228,6 +235,7 @@ class CrossrefClient:
                 method=method,
                 note="no_match",
                 candidates=cands,
+                suggestions=suggestions,
             )
 
         # If strict (and not direct DOI), enforce title and year checks
