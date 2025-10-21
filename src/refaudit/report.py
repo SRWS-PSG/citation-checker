@@ -39,6 +39,13 @@ def _section_bad(r: MatchResult) -> list[str]:
                     f"  DOI: `{c.get('DOI')}`",
                 ]
             lines.append("")
+        if r.suggestions:
+            lines += [
+                "### 次のチェック候補",
+            ]
+            for hint in r.suggestions:
+                lines.append(f"- {hint}")
+            lines.append("")
         return lines
     # retracted
     lines = [
