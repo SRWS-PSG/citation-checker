@@ -7,6 +7,21 @@ from .crossref import MatchResult
 
 def _section_bad(r: MatchResult) -> list[str]:
     if not r.found:
+        if r.note == "author_mismatch":
+            lines = [
+                "## ⚠️ 著者名不一致",
+                "",
+                f"- 入力: `{r.input_text}`",
+                "- 理由: 著者名が一致しません",
+                "",
+            ]
+            if r.input_authors:
+                lines.append(f"- 入力著者: {', '.join(r.input_authors)}")
+            if r.matched_authors:
+                lines.append(f"- Crossref著者（先頭5名）: {', '.join(r.matched_authors)}")
+            lines.append("")
+            return lines
+        
         reason = "候補なし"
         if r.method == "doi":
             reason = "DOI直参照 `/works/{doi}` 失敗"

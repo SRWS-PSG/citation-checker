@@ -28,10 +28,12 @@ class MatchResult:
     found: bool
     retracted: bool
     retraction_details: list[dict]
-    method: str | None = None  # 'doi', 'bibliographic', or 'doi->bibliographic'
-    note: str | None = None    # reason/hint when not found
-    candidates: list[dict] | None = None  # optional debug candidates
-    suggestions: list[str] | None = None  # follow-up actions for operators
+    method: str | None = None
+    note: str | None = None
+    candidates: list[dict] | None = None
+    suggestions: list[str] | None = None
+    input_authors: list[str] | None = None
+    matched_authors: list[str] | None = None
 
 
 _SYNONYMS = [
@@ -68,20 +70,69 @@ def _extract_year(text: str) -> int | None:
     return int(m.group(0)) if m else None
 
 
+def _has_alphabetic_content(text: str) -> bool:
+    return bool(re.search(r'[a-zA-Z]', text))
+
+
+def _strip_doi_from_text(text: str) -> str:
+    from .parser import extract_doi
+    doi = extract_doi(text)
+    if doi:
+        text = text.replace(doi, '')
+        text = re.sub(r'\bDOI:\s*', '', text, flags=re.IGNORECASE)
+    return text
+
+
 def _title_matches_strict(ref_line: str, candidate_title: str) -> bool:
-    ref_n = _normalize_text(ref_line)
-    tit_n = _normalize_text(candidate_title or "")
+    if not candidate_title:
+        return False
+    
+    tit_n = _normalize_text(candidate_title)
     if not tit_n:
         return False
-    # exact-ish: title substring contained either way
+    
+    if not _has_alphabetic_content(candidate_title):
+        return False
+    
+    if len(tit_n) < 10:
+        return False
+    
+    ref_stripped = _strip_doi_from_text(ref_line)
+    ref_n = _normalize_text(ref_stripped)
+    
     if tit_n in ref_n or ref_n in tit_n:
         return True
-    # fallback: require high token overlap (all candidate tokens appear in ref)
+    
     tit_tokens = [t for t in tit_n.split() if len(t) > 2]
     if not tit_tokens:
         return False
     missing = [t for t in tit_tokens if t not in ref_n]
     return len(missing) == 0
+
+
+def _extract_crossref_authors(work: dict) -> list[str]:
+    authors = []
+    for author in work.get("author", []):
+        family = author.get("family", "")
+        if family:
+            family_normalized = unicodedata.normalize('NFKC', family)
+            family_normalized = re.sub(r'[^\w\s-]', '', family_normalized)
+            family_normalized = family_normalized.lower().strip()
+            if family_normalized:
+                authors.append(family_normalized)
+    return authors
+
+
+def _authors_match(input_authors: list[str], crossref_authors: list[str]) -> bool:
+    if not input_authors or not crossref_authors:
+        return True
+    
+    for inp_author in input_authors:
+        for cr_author in crossref_authors:
+            if inp_author == cr_author or inp_author in cr_author or cr_author in inp_author:
+                return True
+    
+    return False
 
 
 class CrossrefClient:
@@ -155,8 +206,9 @@ class CrossrefClient:
         return (len(hits) > 0, hits)
 
     def check_one(self, input_text: str) -> MatchResult:
-        from .parser import extract_doi
+        from .parser import extract_doi, extract_authors
 
+        input_authors = extract_authors(input_text)
         doi = extract_doi(input_text)
         work = None
         method: str | None = None
@@ -164,22 +216,29 @@ class CrossrefClient:
             method = "doi"
             work = self.get_work(doi)
             if not work:
-                # Fallback to bibliographic match when direct DOI lookup fails
                 method = "doi->bibliographic"
-                # Try multiple candidates and choose strict match if enabled
                 for cand in self.search_bibliographic_items(input_text):
                     title = (cand.get("title") or [None])[0]
-                    if not self.strict or _title_matches_strict(input_text, title):
-                        work = cand
-                        break
-        else:
-            method = "bibliographic"
-            # Try multiple candidates and pick first strict match if required
-            for cand in self.search_bibliographic_items(input_text):
-                title = (cand.get("title") or [None])[0]
-                if not self.strict or _title_matches_strict(input_text, title):
+                    if self.strict:
+                        if not _title_matches_strict(input_text, title):
+                            continue
+                        cand_authors = _extract_crossref_authors(cand)
+                        if input_authors and not _authors_match(input_authors, cand_authors):
+                            continue
                     work = cand
                     break
+        else:
+            method = "bibliographic"
+            for cand in self.search_bibliographic_items(input_text):
+                title = (cand.get("title") or [None])[0]
+                if self.strict:
+                    if not _title_matches_strict(input_text, title):
+                        continue
+                    cand_authors = _extract_crossref_authors(cand)
+                    if input_authors and not _authors_match(input_authors, cand_authors):
+                        continue
+                work = cand
+                break
 
         if not work:
             # Fallback: try PubMed exact title match when Crossref has no hit
@@ -279,6 +338,23 @@ class CrossrefClient:
                 candidates=None,
             )
 
+        crossref_authors = _extract_crossref_authors(work)
+        if input_authors and crossref_authors and not _authors_match(input_authors, crossref_authors):
+            return MatchResult(
+                input_text,
+                None,
+                None,
+                found=False,
+                retracted=False,
+                retraction_details=[],
+                method=method,
+                note="author_mismatch",
+                candidates=None,
+                suggestions=None,
+                input_authors=input_authors,
+                matched_authors=crossref_authors[:5],
+            )
+
         doi = work.get("DOI")
         retracted, details = self.is_retracted(doi)
         return MatchResult(
@@ -291,4 +367,7 @@ class CrossrefClient:
             method=method,
             note=None,
             candidates=None,
+            suggestions=None,
+            input_authors=input_authors,
+            matched_authors=crossref_authors[:5] if crossref_authors else None,
         )
