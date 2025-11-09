@@ -57,7 +57,9 @@ def _apply_synonyms(s: str) -> str:
 
 
 def _normalize_text(s: str) -> str:
-    s = unicodedata.normalize("NFKC", s or "").lower()
+    import html
+    s = html.unescape(s or "")
+    s = unicodedata.normalize("NFKC", s).lower()
     s = re.sub(r"\s+", " ", s)
     s = _apply_synonyms(s)
     # remove punctuation-like characters but keep spaces and alnum
@@ -107,7 +109,18 @@ def _title_matches_strict(ref_line: str, candidate_title: str) -> bool:
     if not tit_tokens:
         return False
     missing = [t for t in tit_tokens if t not in ref_n]
-    return len(missing) == 0
+    
+    if len(missing) == 0:
+        return True
+    
+    if len(missing) == 1 and len(tit_tokens) >= 8:
+        missing_token = missing[0]
+        for ref_token in ref_n.split():
+            if len(ref_token) > 3 and len(missing_token) > 3:
+                if missing_token[:4] == ref_token[:4] or missing_token[-4:] == ref_token[-4:]:
+                    return True
+    
+    return False
 
 
 def _extract_crossref_authors(work: dict) -> list[str]:
@@ -241,10 +254,30 @@ class CrossrefClient:
                 break
 
         if not work:
-            # Fallback: try PubMed exact title match when Crossref has no hit
+            pm = PubMedClient()
+            
+            # Fallback 1: try PubMed full citation search
+            pm_hits = pm.search_full_citation(input_text)
+            if pm_hits:
+                chosen = pm_hits[0]
+                retracted, details = (False, [])
+                if chosen.doi:
+                    retracted, details = self.is_retracted(chosen.doi)
+                return MatchResult(
+                    input_text,
+                    chosen.doi,
+                    chosen.title,
+                    found=True,
+                    retracted=retracted,
+                    retraction_details=details,
+                    method="pubmed-full-citation",
+                    note=None,
+                    candidates=None,
+                )
+            
+            # Fallback 2: try PubMed exact title match when Crossref has no hit
             title_guess = extract_title_candidate(input_text) or ""
             if title_guess:
-                pm = PubMedClient()
                 pm_hits = pm.search_title_exact(title_guess)
                 chosen = None
                 for hit in pm_hits:

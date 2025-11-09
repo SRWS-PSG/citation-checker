@@ -35,15 +35,37 @@ def extract_doi(text: str) -> str | None:
 
 
 def extract_title_candidate(ref_line: str) -> str | None:
-    # Heuristic: title is often the segment after authors, before journal.
-    # Split by period and pick the first sufficiently long segment.
     if not ref_line:
         return None
     parts = [p.strip() for p in ref_line.split(".")]
     parts = [p for p in parts if p]
-    for seg in parts[:4]:
-        if len(seg) >= 15:  # avoid author initials or very short tokens
-            return seg
+    if not parts:
+        return None
+    
+    def looks_like_authors(seg: str) -> bool:
+        comma_count = seg.count(',')
+        has_et_al = 'et al' in seg.lower()
+        has_initials = bool(re.search(r'\b[A-Z]{1,3}\b', seg))
+        return comma_count >= 2 or has_et_al or (comma_count >= 1 and has_initials)
+    
+    def score_as_title(seg: str) -> int:
+        words = seg.split()
+        word_count = len(words)
+        digit_count = sum(1 for c in seg if c.isdigit())
+        return word_count * 10 - digit_count
+    
+    candidates = []
+    for i, seg in enumerate(parts[:4]):
+        if i == 0 and looks_like_authors(seg):
+            continue
+        if len(seg) >= 15:
+            score = score_as_title(seg)
+            candidates.append((score, seg))
+    
+    if candidates:
+        candidates.sort(reverse=True)
+        return candidates[0][1]
+    
     return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
 
 
@@ -52,8 +74,8 @@ def extract_authors(ref_line: str) -> list[str]:
     Extract author family names from a reference line.
     Returns a list of normalized family names.
     
-    Heuristic: authors appear before the year (YYYY) or DOI.
-    Split by commas and extract family names (last token before initials).
+    Heuristic: authors appear before the first period or year.
+    Split by commas and extract family names (first token after removing initials).
     """
     import unicodedata
     
@@ -62,15 +84,18 @@ def extract_authors(ref_line: str) -> list[str]:
     
     author_segment = ref_line
     
-    doi_match = re.search(r'\bDOI:', ref_line, re.IGNORECASE)
-    if doi_match:
-        author_segment = ref_line[:doi_match.start()]
+    first_period = ref_line.find('.')
+    if first_period > 0:
+        author_segment = ref_line[:first_period]
     
-    year_match = re.search(r'\((19|20)\d{2}\)', author_segment)
+    year_match = re.search(r'\b(19|20)\d{2}\b', author_segment)
     if year_match:
         author_segment = author_segment[:year_match.start()]
     
-    # Split by commas and extract family names
+    doi_match = re.search(r'\bDOI:', author_segment, re.IGNORECASE)
+    if doi_match:
+        author_segment = author_segment[:doi_match.start()]
+    
     authors = []
     parts = author_segment.split(',')
     
@@ -82,7 +107,8 @@ def extract_authors(ref_line: str) -> list[str]:
         if re.match(r'^et\s+al\.?$', part, re.IGNORECASE):
             continue
         
-        cleaned = re.sub(r'\b[A-Z]\.\s*', '', part)
+        cleaned = re.sub(r'\b[A-Z]{1,3}\b', '', part)
+        cleaned = re.sub(r'\.', '', cleaned)
         cleaned = cleaned.strip()
         
         if not cleaned:
@@ -90,7 +116,7 @@ def extract_authors(ref_line: str) -> list[str]:
         
         tokens = cleaned.split()
         if tokens:
-            family_name = tokens[-1]
+            family_name = tokens[0]
             family_name = unicodedata.normalize('NFKC', family_name)
             family_name = re.sub(r'[^\w\s-]', '', family_name)
             family_name = family_name.lower().strip()
