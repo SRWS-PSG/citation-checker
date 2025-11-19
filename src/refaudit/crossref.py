@@ -346,8 +346,6 @@ class CrossrefClient:
             )
 
         ref_year = _extract_year(input_text)
-        work_year = None
-        # Prefer published-print year if available, else issued, else published-online
         def year_from(field: str) -> int | None:
             obj = work.get(field, {})
             if isinstance(obj, dict):
@@ -356,20 +354,30 @@ class CrossrefClient:
                     return parts[0][0]
             return None
 
-        work_year = year_from("published-print") or year_from("issued") or year_from("published-online")
+        candidate_years = set()
+        for field in ["published-print", "issued", "published-online"]:
+            y = year_from(field)
+            if y:
+                candidate_years.add(y)
 
-        if self.strict and method != "doi" and ref_year and work_year and ref_year != work_year:
-            return MatchResult(
-                input_text,
-                None,
-                None,
-                found=False,
-                retracted=False,
-                retraction_details=[],
-                method=method,
-                note="year_mismatch",
-                candidates=None,
-            )
+        if self.strict and method != "doi" and ref_year and candidate_years:
+            if ref_year not in candidate_years:
+                min_year = min(candidate_years)
+                max_year = max(candidate_years)
+                year_diff = min(abs(ref_year - min_year), abs(ref_year - max_year))
+                
+                if year_diff > 1:
+                    return MatchResult(
+                        input_text,
+                        None,
+                        None,
+                        found=False,
+                        retracted=False,
+                        retraction_details=[],
+                        method=method,
+                        note="year_mismatch",
+                        candidates=None,
+                    )
 
         crossref_authors = _extract_crossref_authors(work)
         if input_authors and crossref_authors and not _authors_match(input_authors, crossref_authors):
