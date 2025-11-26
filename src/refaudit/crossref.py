@@ -67,9 +67,17 @@ def _normalize_text(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def _extract_years(text: str) -> list[int]:
+    """Extract all years from text after stripping DOIs/URLs."""
+    text = _strip_doi_from_text(text)
+    years = re.findall(r"\b((?:19|20)\d{2})\b", text)
+    return [int(y) for y in years]
+
+
 def _extract_year(text: str) -> int | None:
-    m = re.search(r"\b(19|20)\d{2}\b", text)
-    return int(m.group(0)) if m else None
+    """Extract the last year from text (for backwards compatibility)."""
+    years = _extract_years(text)
+    return years[-1] if years else None
 
 
 def _has_alphabetic_content(text: str) -> bool:
@@ -345,7 +353,7 @@ class CrossrefClient:
                 candidates=None,
             )
 
-        ref_year = _extract_year(input_text)
+        ref_years = _extract_years(input_text)
         def year_from(field: str) -> int | None:
             obj = work.get(field, {})
             if isinstance(obj, dict):
@@ -360,24 +368,17 @@ class CrossrefClient:
             if y:
                 candidate_years.add(y)
 
-        if self.strict and method != "doi" and ref_year and candidate_years:
-            if ref_year not in candidate_years:
-                min_year = min(candidate_years)
-                max_year = max(candidate_years)
-                year_diff = min(abs(ref_year - min_year), abs(ref_year - max_year))
-                
-                if year_diff > 1:
-                    return MatchResult(
-                        input_text,
-                        None,
-                        None,
-                        found=False,
-                        retracted=False,
-                        retraction_details=[],
-                        method=method,
-                        note="year_mismatch",
-                        candidates=None,
-                    )
+        # Check if ANY reference year matches ANY candidate year (within ±1)
+        year_note = None
+        if self.strict and method != "doi" and ref_years and candidate_years:
+            min_diff = min(
+                abs(ry - cy)
+                for ry in ref_years
+                for cy in candidate_years
+            )
+            if min_diff > 1:
+                # Title/author match but year doesn't - mark as warning instead of rejection
+                year_note = "year_warning"
 
         crossref_authors = _extract_crossref_authors(work)
         if input_authors and crossref_authors and not _authors_match(input_authors, crossref_authors):
@@ -406,7 +407,7 @@ class CrossrefClient:
             retracted=retracted,
             retraction_details=details,
             method=method,
-            note=None,
+            note=year_note,
             candidates=None,
             suggestions=None,
             input_authors=input_authors,
