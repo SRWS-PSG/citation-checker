@@ -11,6 +11,7 @@ import requests
 from dotenv import load_dotenv
 from .parser import extract_title_candidate
 from .pubmed import PubMedClient
+from .doi_resolver import DOIResolver
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
@@ -226,6 +227,29 @@ class CrossrefClient:
                     )
         return (len(hits) > 0, hits)
 
+    def _doi_metadata_to_work(self, doi_meta) -> dict:
+        """
+        Convert DOIMetadata from doi_resolver to a work dict compatible with Crossref format.
+        This allows unified processing of metadata from different RAs.
+        """
+        work = {
+            "DOI": doi_meta.doi,
+            "title": [doi_meta.title] if doi_meta.title else [],
+            "author": [
+                {"family": a.get("family", ""), "given": a.get("given", "")}
+                for a in doi_meta.authors
+            ],
+            "container-title": [doi_meta.container_title] if doi_meta.container_title else [],
+            "volume": doi_meta.volume,
+            "issue": doi_meta.issue,
+            "page": doi_meta.page,
+        }
+        
+        if doi_meta.year:
+            work["issued"] = {"date-parts": [[doi_meta.year]]}
+        
+        return work
+
     def check_one(self, input_text: str) -> MatchResult:
         from .parser import extract_doi, extract_authors
 
@@ -233,22 +257,65 @@ class CrossrefClient:
         doi = extract_doi(input_text)
         work = None
         method: str | None = None
+        
         if doi:
-            method = "doi"
-            work = self.get_work(doi)
+            # Step 0: Input has DOI - treat it as authoritative identity (never swap for different DOI)
+            # Step 1: Detect Registration Agency via doiRA
+            resolver = DOIResolver(pause_sec=self.pause_sec)
+            ra = resolver.detect_ra(doi)
+            
+            # Step 2: Try RA-specific API or content negotiation
+            if ra == "Crossref":
+                method = "doi-crossref"
+                work = self.get_work(doi)
+            elif ra == "DataCite":
+                method = "doi-datacite"
+                doi_meta = resolver.resolve_via_datacite(doi)
+                if doi_meta:
+                    work = self._doi_metadata_to_work(doi_meta)
+            elif ra == "JaLC":
+                method = "doi-jalc"
+                doi_meta = resolver.resolve_via_content_negotiation(doi)
+                if doi_meta:
+                    work = self._doi_metadata_to_work(doi_meta)
+            elif ra:
+                # Other RA (mEDRA, CNKI, etc.) - use content negotiation
+                method = f"doi-{ra.lower()}"
+                doi_meta = resolver.resolve_via_content_negotiation(doi)
+                if doi_meta:
+                    work = self._doi_metadata_to_work(doi_meta)
+            else:
+                # RA detection failed - try Crossref first, then content negotiation
+                method = "doi"
+                work = self.get_work(doi)
+                if not work:
+                    method = "doi-content-negotiation"
+                    doi_meta = resolver.resolve_via_content_negotiation(doi)
+                    if doi_meta:
+                        work = self._doi_metadata_to_work(doi_meta)
+            
+            # If DOI resolution failed completely, return "DOI not resolved" instead of
+            # falling back to bibliographic search (which could return a different DOI)
             if not work:
-                method = "doi->bibliographic"
-                for cand in self.search_bibliographic_items(input_text):
-                    title = (cand.get("title") or [None])[0]
-                    if self.strict:
-                        if not _title_matches_strict(input_text, title):
-                            continue
-                        cand_authors = _extract_crossref_authors(cand)
-                        if input_authors and not _authors_match(input_authors, cand_authors):
-                            continue
-                    work = cand
-                    break
+                suggestions = [
+                    f"DOI解決失敗: {doi}",
+                    f"RA: {ra or '不明'}",
+                    f"doi.orgで確認: https://doi.org/{doi}",
+                ]
+                return MatchResult(
+                    input_text,
+                    doi,  # Keep the input DOI
+                    None,
+                    found=False,
+                    retracted=False,
+                    retraction_details=[],
+                    method=method,
+                    note="doi_not_resolved",
+                    candidates=None,
+                    suggestions=suggestions,
+                )
         else:
+            # No DOI in input - use bibliographic search with fallbacks
             method = "bibliographic"
             for cand in self.search_bibliographic_items(input_text):
                 title = (cand.get("title") or [None])[0]
@@ -261,38 +328,13 @@ class CrossrefClient:
                 work = cand
                 break
 
-        if not work:
-            pm = PubMedClient()
-            
-            # Fallback 1: try PubMed full citation search
-            pm_hits = pm.search_full_citation(input_text)
-            if pm_hits:
-                chosen = pm_hits[0]
-                retracted, details = (False, [])
-                if chosen.doi:
-                    retracted, details = self.is_retracted(chosen.doi)
-                return MatchResult(
-                    input_text,
-                    chosen.doi,
-                    chosen.title,
-                    found=True,
-                    retracted=retracted,
-                    retraction_details=details,
-                    method="pubmed-full-citation",
-                    note=None,
-                    candidates=None,
-                )
-            
-            # Fallback 2: try PubMed exact title match when Crossref has no hit
-            title_guess = extract_title_candidate(input_text) or ""
-            if title_guess:
-                pm_hits = pm.search_title_exact(title_guess)
-                chosen = None
-                for hit in pm_hits:
-                    if _normalize_text(hit.title) == _normalize_text(title_guess):
-                        chosen = hit
-                        break
-                if chosen:
+            if not work:
+                pm = PubMedClient()
+                
+                # Fallback 1: try PubMed full citation search
+                pm_hits = pm.search_full_citation(input_text)
+                if pm_hits:
+                    chosen = pm_hits[0]
                     retracted, details = (False, [])
                     if chosen.doi:
                         retracted, details = self.is_retracted(chosen.doi)
@@ -303,44 +345,71 @@ class CrossrefClient:
                         found=True,
                         retracted=retracted,
                         retraction_details=details,
-                        method="pubmed-title",
+                        method="pubmed-full-citation",
                         note=None,
                         candidates=None,
                     )
-            cands = None
-            suggestions: list[str] = []
-            if title_guess:
-                suggestions.append(f"タイトル候補でウェブ検索: \"{title_guess}\"")
-                search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(title_guess)
-                suggestions.append(f"Google検索: {search_url}")
-            suggestions = suggestions or None
-            if self.debug:
-                # collect top 3 candidates for troubleshooting
-                cands = []
-                for cand in self.search_bibliographic_items(input_text, rows=3):
-                    cands.append({
-                        "DOI": cand.get("DOI"),
-                        "title": (cand.get("title") or [None])[0],
-                        "year": (cand.get("published-print") or cand.get("issued") or {}).get("date-parts", [[None]])[0][0],
-                        "container": (cand.get("container-title") or [None])[0],
-                        "page": cand.get("page"),
-                    })
-            return MatchResult(
-                input_text,
-                None,
-                None,
-                found=False,
-                retracted=False,
-                retraction_details=[],
-                method=method,
-                note="no_match",
-                candidates=cands,
-                suggestions=suggestions,
-            )
+                
+                # Fallback 2: try PubMed exact title match when Crossref has no hit
+                title_guess = extract_title_candidate(input_text) or ""
+                if title_guess:
+                    pm_hits = pm.search_title_exact(title_guess)
+                    chosen = None
+                    for hit in pm_hits:
+                        if _normalize_text(hit.title) == _normalize_text(title_guess):
+                            chosen = hit
+                            break
+                    if chosen:
+                        retracted, details = (False, [])
+                        if chosen.doi:
+                            retracted, details = self.is_retracted(chosen.doi)
+                        return MatchResult(
+                            input_text,
+                            chosen.doi,
+                            chosen.title,
+                            found=True,
+                            retracted=retracted,
+                            retraction_details=details,
+                            method="pubmed-title",
+                            note=None,
+                            candidates=None,
+                        )
+                cands = None
+                suggestions: list[str] = []
+                if title_guess:
+                    suggestions.append(f"タイトル候補でウェブ検索: \"{title_guess}\"")
+                    search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(title_guess)
+                    suggestions.append(f"Google検索: {search_url}")
+                suggestions = suggestions or None
+                if self.debug:
+                    # collect top 3 candidates for troubleshooting
+                    cands = []
+                    for cand in self.search_bibliographic_items(input_text, rows=3):
+                        cands.append({
+                            "DOI": cand.get("DOI"),
+                            "title": (cand.get("title") or [None])[0],
+                            "year": (cand.get("published-print") or cand.get("issued") or {}).get("date-parts", [[None]])[0][0],
+                            "container": (cand.get("container-title") or [None])[0],
+                            "page": cand.get("page"),
+                        })
+                return MatchResult(
+                    input_text,
+                    None,
+                    None,
+                    found=False,
+                    retracted=False,
+                    retraction_details=[],
+                    method=method,
+                    note="no_match",
+                    candidates=cands,
+                    suggestions=suggestions,
+                )
 
-        # If strict (and not direct DOI), enforce title and year checks
+        # If strict (and not direct DOI resolution), enforce title and year checks
+        # Skip strict validation for DOI-based methods where we trust the DOI resolution
+        is_doi_based = method and method.startswith("doi")
         title = (work.get("title") or [None])[0]
-        if self.strict and method != "doi" and title and not _title_matches_strict(input_text, title):
+        if self.strict and not is_doi_based and title and not _title_matches_strict(input_text, title):
             return MatchResult(
                 input_text,
                 None,
@@ -370,7 +439,7 @@ class CrossrefClient:
 
         # Check if ANY reference year matches ANY candidate year (within ±1)
         year_note = None
-        if self.strict and method != "doi" and ref_years and candidate_years:
+        if self.strict and not is_doi_based and ref_years and candidate_years:
             min_diff = min(
                 abs(ry - cy)
                 for ry in ref_years
