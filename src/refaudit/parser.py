@@ -2,6 +2,20 @@ import re
 
 DOI_REGEX = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
 
+# arXiv ID patterns:
+# New format: 2307.06464, 2307.06464v1, 2307.06464v2
+# Old format: hep-th/9901001, math.AG/0601001v1
+ARXIV_ID_REGEX = re.compile(
+    r"(?:arXiv:\s*|arxiv\.org/abs/)"
+    r"((?:\d{4}\.\d{4,5}(?:v\d+)?)"
+    r"|(?:[a-zA-Z][a-zA-Z\-\.]+/\d{7}(?:v\d+)?))",
+    re.IGNORECASE,
+)
+# Bare arXiv ID (without arXiv: prefix) for fallback
+ARXIV_ID_BARE_REGEX = re.compile(
+    r"\b(\d{4}\.\d{4,5}(?:v\d+)?)\b"
+)
+
 
 def split_references(pasted_text: str) -> list[str]:
     # シンプル：改行ごとに1書誌。空行と番号プレフィックス、明らかなラベル行を除去。
@@ -32,6 +46,58 @@ def extract_doi(text: str) -> str | None:
         return None
     doi = m.group(1).rstrip(").,;")
     return doi
+
+
+def extract_arxiv_id(text: str) -> str | None:
+    """Extract arXiv ID from text.
+
+    Supports:
+    - arXiv:2307.06464 / arXiv:2307.06464v1
+    - arxiv.org/abs/2307.06464
+    - arXiv:hep-th/9901001
+    - Bare new-format IDs like 2307.06464 (only when 'arXiv' context is present)
+    """
+    # Try explicit arXiv: prefix or URL first
+    m = ARXIV_ID_REGEX.search(text)
+    if m:
+        return m.group(1)
+    # Fallback: bare new-format ID, but only if 'arxiv' appears somewhere in the text
+    if re.search(r"arxiv", text, re.IGNORECASE):
+        m = ARXIV_ID_BARE_REGEX.search(text)
+        if m:
+            return m.group(1)
+    return None
+
+
+def is_website_reference(text: str) -> bool:
+    """Detect if a reference line is a website/software reference (not a journal article).
+
+    These references should not be searched in academic databases as they will
+    produce false positive matches.
+    """
+    lower = text.lower()
+    # Check for URL-dominant references (short text with a URL)
+    url_match = re.search(r"https?://[^\s]+", text)
+    if url_match:
+        # Remove the URL and see what remains
+        remaining = text[:url_match.start()] + text[url_match.end():]
+        remaining = re.sub(r"[\s.,;:]+", " ", remaining).strip()
+        # If remaining text is very short (just a name/label), it's a website ref
+        word_count = len([w for w in remaining.split() if len(w) > 1])
+        if word_count <= 8:
+            return True
+    # Known software/website patterns
+    website_indicators = [
+        "systematic review software",
+        "ai-powered tool",
+        "ai research assistant",
+        "evidence partners",
+        "installation documentation",
+    ]
+    for indicator in website_indicators:
+        if indicator in lower:
+            return True
+    return False
 
 
 def extract_title_candidate(ref_line: str) -> str | None:
