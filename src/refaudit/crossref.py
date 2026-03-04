@@ -12,6 +12,7 @@ from dotenv import load_dotenv
 from .parser import extract_title_candidate
 from .pubmed import PubMedClient
 from .doi_resolver import DOIResolver
+from .arxiv import ArxivClient
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
@@ -35,6 +36,10 @@ class MatchResult:
     suggestions: list[str] | None = None
     input_authors: list[str] | None = None
     matched_authors: list[str] | None = None
+    arxiv_id: str | None = None
+    arxiv_doi: str | None = None
+    journal_ref: str | None = None
+    is_website: bool = False
 
 
 _SYNONYMS = [
@@ -251,13 +256,71 @@ class CrossrefClient:
         return work
 
     def check_one(self, input_text: str) -> MatchResult:
-        from .parser import extract_doi, extract_authors
+        from .parser import extract_doi, extract_authors, extract_arxiv_id, is_website_reference
 
         input_authors = extract_authors(input_text)
         doi = extract_doi(input_text)
+        arxiv_id = extract_arxiv_id(input_text)
         work = None
         method: str | None = None
-        
+
+        # Step 0: Check if this is a website/software reference
+        if is_website_reference(input_text):
+            return MatchResult(
+                input_text,
+                doi=None,
+                title=None,
+                found=True,
+                retracted=False,
+                retraction_details=[],
+                method="website",
+                note="website_reference",
+                is_website=True,
+            )
+
+        # Step 1: If arXiv ID is present (and no DOI), use arXiv API as primary source
+        if arxiv_id and not doi:
+            arxiv_client = ArxivClient(pause_sec=self.pause_sec)
+            arxiv_match, arxiv_method = arxiv_client.verify_reference(
+                arxiv_id=arxiv_id,
+            )
+            if arxiv_match:
+                # arXiv paper found - check retraction if DOI available
+                retracted, details = (False, [])
+                if arxiv_match.doi:
+                    retracted, details = self.is_retracted(arxiv_match.doi)
+                return MatchResult(
+                    input_text,
+                    doi=arxiv_match.doi,
+                    title=arxiv_match.title,
+                    found=True,
+                    retracted=retracted,
+                    retraction_details=details,
+                    method=arxiv_method,
+                    note=None,
+                    arxiv_id=arxiv_match.arxiv_id,
+                    arxiv_doi=arxiv_match.doi,
+                    journal_ref=arxiv_match.journal_ref,
+                    input_authors=input_authors,
+                )
+            else:
+                # arXiv ID not found
+                return MatchResult(
+                    input_text,
+                    doi=None,
+                    title=None,
+                    found=False,
+                    retracted=False,
+                    retraction_details=[],
+                    method=arxiv_method,
+                    note="arxiv_not_found",
+                    suggestions=[
+                        f"arXiv ID未発見: {arxiv_id}",
+                        f"arXiv.orgで確認: https://arxiv.org/abs/{arxiv_id}",
+                    ],
+                    arxiv_id=arxiv_id,
+                )
+
         if doi:
             # Step 0: Input has DOI - treat it as authoritative identity (never swap for different DOI)
             # Step 1: Detect Registration Agency via doiRA
@@ -374,6 +437,33 @@ class CrossrefClient:
                             note=None,
                             candidates=None,
                         )
+
+                # Fallback 3: try arXiv title search
+                if title_guess:
+                    arxiv_client = ArxivClient(pause_sec=self.pause_sec)
+                    arxiv_match, arxiv_method = arxiv_client.verify_reference(
+                        title=title_guess,
+                        authors=input_authors,
+                    )
+                    if arxiv_match:
+                        retracted, details = (False, [])
+                        if arxiv_match.doi:
+                            retracted, details = self.is_retracted(arxiv_match.doi)
+                        return MatchResult(
+                            input_text,
+                            doi=arxiv_match.doi,
+                            title=arxiv_match.title,
+                            found=True,
+                            retracted=retracted,
+                            retraction_details=details,
+                            method=arxiv_method,
+                            note=None,
+                            arxiv_id=arxiv_match.arxiv_id,
+                            arxiv_doi=arxiv_match.doi,
+                            journal_ref=arxiv_match.journal_ref,
+                            input_authors=input_authors,
+                        )
+
                 cands = None
                 suggestions: list[str] = []
                 if title_guess:
