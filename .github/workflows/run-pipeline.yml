@@ -39,7 +39,7 @@ jobs:
         REF_PATH="${{ inputs.path }}"
         if [ -z "$REF_PATH" ]; then REF_PATH="input/references.txt"; fi
         echo "Using references from: $REF_PATH"
-        python -m refaudit.main --text "$(cat "$REF_PATH")" --out outputs/report.md
+        citeguard --input-file "$REF_PATH" --out outputs/report.md
         echo "=== outputs/report.md ==="
         sed -n '1,120p' outputs/report.md
     - name: Commit report
