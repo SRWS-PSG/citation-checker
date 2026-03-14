@@ -36,13 +36,15 @@ cp .env.example .env   # CONTACT_EMAIL を編集
 
 ### Vercel デプロイ
 
+公開インスタンス: **https://citation-checker-three.vercel.app**
+
 ```bash
 npm install -g vercel
 vercel
 vercel --prod
 ```
 
-Vercel では Framework Preset を `Other` とし、`vercel.json` をそのまま使います。ローカル確認は `vercel dev` です。
+Vercel では Framework Preset を `Other` とし、`vercel.json` をそのまま使います。Hobby（無料）プランで運用可能です（Serverless Function 実行上限 10 秒）。ローカル確認は `vercel dev` です。
 
 ## CLI
 
