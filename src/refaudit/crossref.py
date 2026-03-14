@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import time
 import urllib.parse
 from dataclasses import dataclass
@@ -8,18 +7,15 @@ import re
 import unicodedata
 
 import requests
-from dotenv import load_dotenv
 from .parser import extract_title_candidate
 from .pubmed import PubMedClient
 from .doi_resolver import DOIResolver
 from .arxiv import ArxivClient
+from .etiquette import build_user_agent
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
 
-load_dotenv()
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
-UA = {"User-Agent": f"ref-audit/0.1 (mailto:{CONTACT_EMAIL})"}
 
 
 @dataclass
@@ -163,12 +159,19 @@ def _authors_match(input_authors: list[str], crossref_authors: list[str]) -> boo
 
 
 class CrossrefClient:
-    def __init__(self, pause_sec: float = 0.2, strict: bool = True, debug: bool = False):
+    def __init__(
+        self,
+        pause_sec: float = 0.2,
+        strict: bool = True,
+        debug: bool = False,
+        email: str | None = None,
+    ):
         self.session = requests.Session()
-        self.session.headers.update(UA)
+        self.session.headers.update({"User-Agent": build_user_agent(email)})
         self.pause_sec = pause_sec
         self.strict = strict
         self.debug = debug
+        self.email = email
 
     def _get(self, url: str, params: dict | None = None):
         try:
@@ -280,7 +283,7 @@ class CrossrefClient:
 
         # Step 1: If arXiv ID is present (and no DOI), use arXiv API as primary source
         if arxiv_id and not doi:
-            arxiv_client = ArxivClient(pause_sec=self.pause_sec)
+            arxiv_client = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
             arxiv_match, arxiv_method = arxiv_client.verify_reference(
                 arxiv_id=arxiv_id,
             )
@@ -324,7 +327,7 @@ class CrossrefClient:
         if doi:
             # Step 0: Input has DOI - treat it as authoritative identity (never swap for different DOI)
             # Step 1: Detect Registration Agency via doiRA
-            resolver = DOIResolver(pause_sec=self.pause_sec)
+            resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email)
             ra = resolver.detect_ra(doi)
             
             # Step 2: Try RA-specific API or content negotiation
@@ -392,7 +395,7 @@ class CrossrefClient:
                 break
 
             if not work:
-                pm = PubMedClient()
+                pm = PubMedClient(email=self.email)
                 
                 # Fallback 1: try PubMed full citation search
                 pm_hits = pm.search_full_citation(input_text)
@@ -440,7 +443,7 @@ class CrossrefClient:
 
                 # Fallback 3: try arXiv title search
                 if title_guess:
-                    arxiv_client = ArxivClient(pause_sec=self.pause_sec)
+                    arxiv_client = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
                     arxiv_match, arxiv_method = arxiv_client.verify_reference(
                         title=title_guess,
                         authors=input_authors,

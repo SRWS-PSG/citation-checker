@@ -1,6 +1,6 @@
 # citeguard
 
-学術参考文献を Crossref・PubMed・arXiv の 3 つの API で照合し、**存在しない引用**や**撤回（Retraction / Withdrawal / Removal）された論文**を検出する CLI ツールです。DOI が Crossref 以外の登録機関（DataCite・JaLC 等）に属する場合も自動でフォールバック解決します。
+学術参考文献を Crossref・PubMed・arXiv の 3 つの API で照合し、**存在しない引用**や**撤回（Retraction / Withdrawal / Removal）された論文**を検出するツールです。CLI に加えて、Vercel へ配置できる Web UI も含みます。DOI が Crossref 以外の登録機関（DataCite・JaLC 等）に属する場合も自動でフォールバック解決します。
 
 ```bash
 pip install citeguard
@@ -22,7 +22,29 @@ pip install -e ".[dev]"
 cp .env.example .env   # CONTACT_EMAIL を編集
 ```
 
-## 使い方
+## Web UI
+
+`public/` に静的フロントエンド、`api/check.py` に Vercel Python Serverless Function を含みます。ブラウザから参考文献を貼り付けて逐次チェックできます。
+
+### Web でのメールアドレスの扱い
+
+- チェック実行時に、Crossref / PubMed の etiquette 用としてメールアドレス入力が必須です。
+- メールアドレスは API リクエストごとに送信され、`User-Agent` / `email` パラメータのためにのみ使用します。
+- サーバー側で保存しません。
+- 既定ではブラウザにも保存しません。
+- `このブラウザにメールアドレスを保存` を ON にした場合のみ、ブラウザの `localStorage` に保存します。
+
+### Vercel デプロイ
+
+```bash
+npm install -g vercel
+vercel
+vercel --prod
+```
+
+Vercel では Framework Preset を `Other` とし、`vercel.json` をそのまま使います。ローカル確認は `vercel dev` です。
+
+## CLI
 
 ```bash
 # ファイルを指定して実行（結果は stdout）
@@ -135,6 +157,10 @@ python -m refaudit --input-file input/references.txt
 - タイトル類似度や年差でのスコア閾値を追加して厳密化。
 - 出力拡張（Retraction Watch 詳細の突き合わせ）。
 - レート管理（`rows`・`select`・カーソル利用）。
+
+## 資金源
+
+本プロジェクトは JSPS 科研費 JP25K13585（基盤研究(C)「大規模言語モデルが加速するエビデンスの統合」、研究代表者：片岡 裕貴、2025〜2027年度）の助成を受けています。
 
 ---
 

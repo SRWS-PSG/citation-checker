@@ -35,7 +35,7 @@ def split_references(pasted_text: str) -> list[str]:
         if line.lower() in skip_labels:
             continue
         # 例: [1] , 1) , 1. などを剥がす
-        line = re.sub(r"^\s*(\[\d+\]|\d+[\.\)]\s*)", "", line)
+        line = re.sub(r"^\s*(\[\d+\]|\d+[\.\)]\s*)", "", line).strip()
         refs.append(line)
     return refs
 

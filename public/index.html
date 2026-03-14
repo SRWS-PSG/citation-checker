@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>CiteGuard</title>
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main class="shell">
+    <section class="hero">
+      <p class="eyebrow">Citation Checker</p>
+      <h1>CiteGuard Web</h1>
+      <p class="lede">参考文献テキストを貼り付けて、未発見・撤回・年注意・ウェブサイト参照をブラウザから確認できます。</p>
+      <div class="notice">
+        <h3>データの取り扱い</h3>
+        <ul>
+          <li>入力された参考文献テキストは <a href="https://api.crossref.org" target="_blank" rel="noopener">Crossref</a>・<a href="https://pubmed.ncbi.nlm.nih.gov/" target="_blank" rel="noopener">PubMed</a>・<a href="https://arxiv.org/" target="_blank" rel="noopener">arXiv</a> の各 API への問い合わせにのみ使用されます。DOI の登録機関に応じて <a href="https://datacite.org/" target="_blank" rel="noopener">DataCite</a>・<a href="https://japanlinkcenter.org/" target="_blank" rel="noopener">JaLC</a>・<a href="https://doi.org/" target="_blank" rel="noopener">doi.org</a> にもフォールバックします。CiteGuard 側ではデータを保存しませんが、問い合わせ先の各サービスにアクセスログ等が残る可能性があります。</li>
+          <li>メールアドレスは、各学術データベースの利用規約で求められる連絡先の通知にのみ使用します。CiteGuard 側では保存しません。「このブラウザにメールアドレスを保存」を ON にした場合のみ、お使いのブラウザ内に保持されます。</li>
+          <li>ソースコードは <a href="https://github.com/SRWS-PSG/citation-checker" target="_blank" rel="noopener">GitHub</a> で公開しています。</li>
+        </ul>
+        <h3>ご注意</h3>
+        <ul>
+          <li>参考文献は <strong>1行につき1件</strong> で入力してください。途中で改行が入ると別の文献として扱われ、正しくチェックできません。</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="panel controls">
+      <label class="field">
+        <span>連絡先メールアドレス</span>
+        <input id="email" type="email" placeholder="you@example.com" autocomplete="email" required>
+      </label>
+
+      <label class="checkbox-row">
+        <input id="remember-email" type="checkbox">
+        <span>このブラウザにメールアドレスを保存</span>
+      </label>
+
+      <label class="field">
+        <span>参考文献テキスト</span>
+        <textarea id="references" rows="14" placeholder="1行に1書誌を貼り付けてください"></textarea>
+      </label>
+
+      <div class="actions">
+        <button id="run" type="button">チェック開始</button>
+        <button id="download" type="button" disabled>Markdown ダウンロード</button>
+      </div>
+
+      <p id="status" class="status">待機中</p>
+    </section>
+
+    <section class="panel results-panel">
+      <div class="results-header">
+        <h2>結果</h2>
+        <p id="summary">まだ実行していません。</p>
+      </div>
+      <div id="results" class="results"></div>
+    </section>
+  </main>
+
+  <template id="result-template">
+    <article class="result-card">
+      <header class="result-card-header">
+        <h3 class="result-title"></h3>
+        <span class="badge"></span>
+      </header>
+      <p class="result-input"></p>
+      <ul class="result-meta"></ul>
+    </article>
+  </template>
+
+  <footer class="site-footer">
+    <p>本ツールは JSPS 科研費 JP25K13585（基盤研究(C)「大規模言語モデルが加速するエビデンスの統合」、研究代表者：片岡 裕貴、2025〜2027年度）の助成を受けています。</p>
+  </footer>
+
+  <script src="/app.js" defer></script>
+</body>
+</html>

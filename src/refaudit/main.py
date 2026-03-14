@@ -11,7 +11,7 @@ def run(text: str, out_path: pathlib.Path | None, show_all: bool = False, debug:
     from .parser import split_references
     from .report import make_markdown_bad_only, make_markdown_full
 
-    client = CrossrefClient(debug=debug)
+    client = CrossrefClient(debug=debug, email=os.getenv("CONTACT_EMAIL"))
     refs = split_references(text)
     results = [client.check_one(line) for line in refs]
     md = make_markdown_full(results) if show_all else make_markdown_bad_only(results)

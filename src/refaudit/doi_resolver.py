@@ -14,17 +14,11 @@ The fallback chain is:
 """
 from __future__ import annotations
 
-import os
 import time
 from dataclasses import dataclass
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
-
-CONTACT_EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
-UA = {"User-Agent": f"ref-audit/0.1 (mailto:{CONTACT_EMAIL})"}
+from .etiquette import build_user_agent
 
 DOIRA_API = "https://doi.org/doiRA"
 DATACITE_API = "https://api.datacite.org/dois"
@@ -56,9 +50,9 @@ class DOIResolver:
     3. Fall back to doi.org content negotiation (universal)
     """
     
-    def __init__(self, pause_sec: float = 0.2):
+    def __init__(self, pause_sec: float = 0.2, email: str | None = None):
         self.session = requests.Session()
-        self.session.headers.update(UA)
+        self.session.headers.update({"User-Agent": build_user_agent(email)})
         self.pause_sec = pause_sec
     
     def _get_json(self, url: str, params: dict | None = None, headers: dict | None = None) -> dict | None:

@@ -29,3 +29,4 @@ build/
 outputs/
 !outputs/.gitkeep 
 
+.vercel

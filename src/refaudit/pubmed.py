@@ -1,17 +1,11 @@
 from __future__ import annotations
 
-import os
 import time
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 
 import requests
-from dotenv import load_dotenv
-
-load_dotenv()
-
-EMAIL = os.getenv("CONTACT_EMAIL", "you@example.com")
-UA = {"User-Agent": f"ref-audit/0.1 (mailto:{EMAIL})"}
+from .etiquette import build_user_agent, resolve_contact_email
 
 
 def _norm(s: str) -> str:
@@ -26,14 +20,15 @@ class PubMedMatch:
 
 
 class PubMedClient:
-    def __init__(self, pause_sec: float = 0.2):
+    def __init__(self, pause_sec: float = 0.2, email: str | None = None):
         self.session = requests.Session()
-        self.session.headers.update(UA)
+        self.email = resolve_contact_email(email)
+        self.session.headers.update({"User-Agent": build_user_agent(self.email)})
         self.pause_sec = pause_sec
 
     def _get_json(self, url: str, params: dict) -> dict | None:
         # E-utilities etiquette
-        params = {**params, "tool": "ref-audit", "email": EMAIL}
+        params = {**params, "tool": "ref-audit", "email": self.email}
         try:
             r = self.session.get(url, params=params, timeout=30)
             r.raise_for_status()
@@ -43,7 +38,7 @@ class PubMedClient:
             return None
 
     def _get_text(self, url: str, params: dict) -> str | None:
-        params = {**params, "tool": "ref-audit", "email": EMAIL}
+        params = {**params, "tool": "ref-audit", "email": self.email}
         try:
             r = self.session.get(url, params=params, timeout=30)
             r.raise_for_status()
