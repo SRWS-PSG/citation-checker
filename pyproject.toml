@@ -48,3 +48,7 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint.per-file-ignores]
+"api/check.py" = ["E402"]
+"scripts/local_web.py" = ["E402"]
