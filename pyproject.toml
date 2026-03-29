@@ -20,6 +20,7 @@ keywords = ["citation", "reference", "crossref", "retraction", "audit", "pubmed"
 dependencies = [
     "requests>=2.32.0",
     "python-dotenv>=1.0.1",
+    "bibtexparser>=1.4.0",
 ]
 
 [project.urls]

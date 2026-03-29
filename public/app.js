@@ -12,7 +12,101 @@ const template = document.getElementById("result-template");
 
 let latestResults = [];
 
-function splitReferences(text) {
+/* ---------- BibTeX detection & parsing ---------- */
+
+const BIBTEX_ENTRY_RE =
+  /@\s*(?:article|book|inproceedings|incollection|conference|phdthesis|mastersthesis|techreport|misc|unpublished|proceedings|inbook|manual|booklet)\s*\{/i;
+
+function detectBibtex(text) {
+  return BIBTEX_ENTRY_RE.test(text || "");
+}
+
+/**
+ * Minimal BibTeX parser — splits text into entry blocks and extracts fields.
+ * Handles nested braces in field values.
+ */
+function parseBibtexEntries(text) {
+  const entries = [];
+  const entryRe =
+    /@\s*(article|book|inproceedings|incollection|conference|phdthesis|mastersthesis|techreport|misc|unpublished|proceedings|inbook|manual|booklet)\s*\{/gi;
+
+  let match;
+  while ((match = entryRe.exec(text)) !== null) {
+    const startBody = match.index + match[0].length;
+    // Walk forward, counting braces to find the matching close
+    let depth = 1;
+    let pos = startBody;
+    while (pos < text.length && depth > 0) {
+      if (text[pos] === "{") depth++;
+      else if (text[pos] === "}") depth--;
+      pos++;
+    }
+    const body = text.slice(startBody, pos - 1);
+    const fields = {};
+
+    // Extract key=value pairs (value delimited by {} or "")
+    const fieldRe = /(\w+)\s*=\s*/g;
+    let fm;
+    while ((fm = fieldRe.exec(body)) !== null) {
+      const key = fm[1].toLowerCase();
+      let valStart = fm.index + fm[0].length;
+      let value = "";
+
+      if (body[valStart] === "{") {
+        let d = 1;
+        let p = valStart + 1;
+        while (p < body.length && d > 0) {
+          if (body[p] === "{") d++;
+          else if (body[p] === "}") d--;
+          p++;
+        }
+        value = body.slice(valStart + 1, p - 1);
+      } else if (body[valStart] === '"') {
+        const end = body.indexOf('"', valStart + 1);
+        value = end > 0 ? body.slice(valStart + 1, end) : "";
+      } else {
+        // Bare value (e.g., month = feb)
+        const rest = body.slice(valStart);
+        const comma = rest.search(/[,}]/);
+        value = (comma >= 0 ? rest.slice(0, comma) : rest).trim();
+      }
+      fields[key] = value.replace(/[{}]/g, "").trim();
+    }
+    entries.push(fields);
+  }
+  return entries;
+}
+
+function bibtexEntryToText(entry) {
+  const parts = [];
+
+  if (entry.author) {
+    const names = entry.author.split(/\s+and\s+/i).map((a) => {
+      const trimmed = a.trim();
+      return trimmed.includes(",") ? trimmed.split(",")[0].trim() : trimmed.split(/\s+/).pop();
+    });
+    parts.push(names.join(", "));
+  }
+  if (entry.year) parts.push(entry.year);
+  if (entry.title) parts.push(entry.title);
+  if (entry.journal) parts.push(entry.journal);
+  else if (entry.booktitle) parts.push(entry.booktitle);
+  if (entry.doi) parts.push(`DOI: ${entry.doi}`);
+  if (entry.eprint && (entry.archiveprefix || "").toLowerCase() === "arxiv") {
+    parts.push(`arXiv:${entry.eprint}`);
+  }
+  return parts.join(". ");
+}
+
+function splitBibtexReferences(text) {
+  return parseBibtexEntries(text)
+    .map(bibtexEntryToText)
+    .filter(Boolean);
+}
+
+/* ---------- Plain-text splitting ---------- */
+
+function splitPlainReferences(text) {
   const skipLabels = new Set([
     "article",
     "pubmed",
@@ -28,6 +122,15 @@ function splitReferences(text) {
     .filter(Boolean)
     .filter((line) => !skipLabels.has(line.toLowerCase()))
     .map((line) => line.replace(/^\s*(\[\d+\]|\d+[\.)]\s*)/, "").trim());
+}
+
+/* ---------- Unified entry point ---------- */
+
+function splitReferences(text) {
+  if (detectBibtex(text)) {
+    return splitBibtexReferences(text);
+  }
+  return splitPlainReferences(text);
 }
 
 function loadStoredEmail() {

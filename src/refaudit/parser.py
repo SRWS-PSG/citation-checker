@@ -17,7 +17,24 @@ ARXIV_ID_BARE_REGEX = re.compile(
 )
 
 
+BIBTEX_ENTRY_REGEX = re.compile(
+    r"@\s*(?:article|book|inproceedings|incollection|conference|phdthesis|mastersthesis"
+    r"|techreport|misc|unpublished|proceedings|inbook|manual|booklet)\s*\{",
+    re.IGNORECASE,
+)
+
+
+def detect_bibtex(text: str) -> bool:
+    """Return True if text appears to be BibTeX format."""
+    return bool(BIBTEX_ENTRY_REGEX.search(text or ""))
+
+
 def split_references(pasted_text: str) -> list[str]:
+    # BibTeX形式を自動検出
+    if detect_bibtex(pasted_text):
+        from .bibtex_parser import load_bibtex_references
+        return load_bibtex_references(pasted_text)
+
     # シンプル：改行ごとに1書誌。空行と番号プレフィックス、明らかなラベル行を除去。
     refs: list[str] = []
     skip_labels = {

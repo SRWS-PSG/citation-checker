@@ -69,7 +69,7 @@ python -m refaudit --input-file input/references.txt
 
 | オプション | 説明 |
 |---|---|
-| `--input-file PATH` | 参考文献ファイル（1行1書誌） |
+| `--input-file PATH` | 参考文献ファイル（1行1書誌 or BibTeX） |
 | `--text TEXT` | インライン参考文献テキスト |
 | `--out PATH` | Markdown レポート出力先（省略時は stdout） |
 | `--all` | 問題のない書誌も含めた全件レポート |
@@ -81,9 +81,23 @@ python -m refaudit --input-file input/references.txt
 
 ## 入力形式
 
+### プレーンテキスト（1行1書誌）
 - 1行＝1書誌。行頭の `[1]` や `1.` は自動で剥がします。
 - 行内に DOI が含まれていればそれを優先使用します。
 - URL のみ・ソフトウェア名のみなどウェブサイト参照は自動判別し、API 検索をスキップします。
+
+### BibTeX（`.bib` ファイル）
+- BibTeX 形式を自動検出します。特別なフラグは不要です。
+- `@article`、`@book`、`@inproceedings` 等の主要エントリタイプに対応。
+- 各エントリの `author`・`title`・`year`・`doi`・`eprint`（arXiv）フィールドを抽出してチェックします。
+
+```bash
+# .bib ファイルを直接指定
+citeguard --input-file references.bib
+
+# パイプでも可
+cat references.bib | citeguard
+```
 
 ## 検索・判定フロー
 

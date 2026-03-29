@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip install:*)",
+      "Bash(citeguard --input-file input/test_sample.bib --all)",
+      "Bash(PYTHONIOENCODING=utf-8 citeguard --input-file input/test_sample.bib --all)"
+    ]
+  }
+}
