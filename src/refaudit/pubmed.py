@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import time
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import re
 
 import requests
 from .etiquette import build_user_agent, resolve_contact_email
@@ -17,6 +18,12 @@ class PubMedMatch:
     pmid: str
     title: str
     doi: str | None
+    authors: list[str] = field(default_factory=list)
+    year: int | None = None
+    journal: str | None = None
+    volume: str | None = None
+    issue: str | None = None
+    pages: str | None = None
 
 
 class PubMedClient:
@@ -52,8 +59,6 @@ class PubMedClient:
         Search PubMed using the full citation text with multiple fallback strategies.
         This is more flexible than title-only search and can handle various citation formats.
         """
-        import re
-        
         results = self._try_search(citation, retmax)
         if results:
             return results
@@ -83,8 +88,6 @@ class PubMedClient:
     
     def _extract_key_terms(self, citation: str) -> str:
         """Extract key terms from citation: authors, year, journal, important title words."""
-        import re
-        
         parts = []
         
         year_match = re.search(r'\b(19|20)\d{2}\b', citation)
@@ -177,12 +180,36 @@ class PubMedClient:
                 item = res.get(pmid, {})
                 title = item.get("title") or ""
                 doi = None
+                authors = [
+                    (author.get("name") or "").strip()
+                    for author in item.get("authors", []) or []
+                    if (author.get("name") or "").strip()
+                ]
+                pubdate = item.get("pubdate") or item.get("sortpubdate") or ""
+                year_match = re.search(r"\b((?:19|20)\d{2})\b", pubdate)
+                year = int(year_match.group(1)) if year_match else None
+                journal = item.get("source") or None
+                volume = item.get("volume") or None
+                issue = item.get("issue") or None
+                pages = item.get("pages") or None
                 # Try to locate DOI in esummary (not always present)
                 for aid in item.get("articleids", []) or []:
                     if (aid.get("idtype") or "").lower() == "doi":
                         doi = aid.get("value")
                         break
-                results.append(PubMedMatch(pmid=pmid, title=title, doi=doi))
+                results.append(
+                    PubMedMatch(
+                        pmid=pmid,
+                        title=title,
+                        doi=doi,
+                        authors=authors,
+                        year=year,
+                        journal=journal,
+                        volume=volume,
+                        issue=issue,
+                        pages=pages,
+                    )
+                )
         # If DOI missing, try efetch XML for the first few
         for i, pm in enumerate(results[:3]):
             if pm.doi:

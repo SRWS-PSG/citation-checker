@@ -1,6 +1,12 @@
+from __future__ import annotations
+
 import re
+import unicodedata
+
+from .scoring import ReferenceRecord, normalize_author_name
 
 DOI_REGEX = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
+JAPANESE_CHAR_REGEX = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 
 # arXiv ID patterns:
 # New format: 2307.06464, 2307.06464v1, 2307.06464v2
@@ -86,6 +92,10 @@ def extract_arxiv_id(text: str) -> str | None:
     return None
 
 
+def contains_japanese_text(text: str | None) -> bool:
+    return bool(JAPANESE_CHAR_REGEX.search(text or ""))
+
+
 def is_website_reference(text: str) -> bool:
     """Detect if a reference line is a website/software reference (not a journal article).
 
@@ -135,7 +145,12 @@ def extract_title_candidate(ref_line: str) -> str | None:
         words = seg.split()
         word_count = len(words)
         digit_count = sum(1 for c in seg if c.isdigit())
-        return word_count * 10 - digit_count
+        score = word_count * 10 - digit_count * 3
+        if re.search(r"\b(?:19|20)\d{2}\b", seg):
+            score -= 80
+        if re.search(r"\d+\s*\(\d+\)", seg):
+            score -= 60
+        return score
     
     candidates = []
     for i, seg in enumerate(parts[:4]):
@@ -152,59 +167,132 @@ def extract_title_candidate(ref_line: str) -> str | None:
     return parts[1] if len(parts) > 1 else (parts[0] if parts else None)
 
 
+def _normalize_reference_line(ref_line: str) -> str:
+    text = unicodedata.normalize("NFKC", ref_line or "")
+    text = text.replace("．", ".").replace("，", ",").replace("：", ":").replace("；", ";")
+    text = text.replace("（", "(").replace("）", ")").replace("・", " ・ ")
+    text = re.sub(r"(?<=[\u3040-\u30ff\u3400-\u9fff])\s+(?=[\u3040-\u30ff\u3400-\u9fff])", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _author_segment(ref_line: str) -> str:
+    text = _normalize_reference_line(ref_line)
+    if not text:
+        return ""
+
+    title = extract_title_candidate(text)
+    if title and title in text:
+        candidate = text.split(title, 1)[0]
+    else:
+        first_period = text.find(".")
+        candidate = text[:first_period] if first_period > 0 else text
+
+    year_match = re.search(r"\b(?:19|20)\d{2}\b", candidate)
+    if year_match:
+        candidate = candidate[:year_match.start()]
+    doi_match = re.search(r"\bDOI:", candidate, re.IGNORECASE)
+    if doi_match:
+        candidate = candidate[:doi_match.start()]
+    return candidate.strip(" .,:;")
+
+
 def extract_authors(ref_line: str) -> list[str]:
-    """
-    Extract author family names from a reference line.
-    Returns a list of normalized family names.
-    
-    Heuristic: authors appear before the first period or year.
-    Split by commas and extract family names (first token after removing initials).
-    """
-    import unicodedata
-    
     if not ref_line:
         return []
-    
-    author_segment = ref_line
-    
-    first_period = ref_line.find('.')
-    if first_period > 0:
-        author_segment = ref_line[:first_period]
-    
-    year_match = re.search(r'\b(19|20)\d{2}\b', author_segment)
-    if year_match:
-        author_segment = author_segment[:year_match.start()]
-    
-    doi_match = re.search(r'\bDOI:', author_segment, re.IGNORECASE)
-    if doi_match:
-        author_segment = author_segment[:doi_match.start()]
-    
-    authors = []
-    parts = author_segment.split(',')
-    
-    for part in parts:
-        part = part.strip()
-        if not part:
+
+    author_segment = _author_segment(ref_line)
+    if not author_segment:
+        return []
+
+    normalized = _normalize_reference_line(author_segment)
+    normalized = re.sub(r"\bet\s+al\.?\b", "", normalized, flags=re.IGNORECASE)
+    normalized = normalized.replace(" and ", ", ")
+    normalized = normalized.replace(" & ", ", ")
+    normalized = normalized.replace(" ・ ", ", ")
+    normalized = normalized.replace("・", ", ")
+    normalized = normalized.replace(";", ",")
+
+    authors: list[str] = []
+    seen: set[str] = set()
+    for part in re.split(r",|\band\b", normalized, flags=re.IGNORECASE):
+        chunk = part.strip()
+        if not chunk:
             continue
-        
-        if re.match(r'^et\s+al\.?$', part, re.IGNORECASE):
+        chunk = re.sub(r"\b[A-Z]{1,3}\b", "", chunk)
+        chunk = chunk.replace(".", " ").strip()
+        if not chunk:
             continue
-        
-        cleaned = re.sub(r'\b[A-Z]{1,3}\b', '', part)
-        cleaned = re.sub(r'\.', '', cleaned)
-        cleaned = cleaned.strip()
-        
-        if not cleaned:
-            continue
-        
-        tokens = cleaned.split()
-        if tokens:
-            family_name = tokens[0]
-            family_name = unicodedata.normalize('NFKC', family_name)
-            family_name = re.sub(r'[^\w\s-]', '', family_name)
-            family_name = family_name.lower().strip()
-            
-            if family_name and len(family_name) > 1:
-                authors.append(family_name)
-    
+        token = normalize_author_name(chunk)
+        if token and token not in seen:
+            seen.add(token)
+            authors.append(token)
+
     return authors
+
+
+def _extract_year(text: str) -> int | None:
+    years = re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", _normalize_reference_line(text))
+    return int(years[-1]) if years else None
+
+
+def _extract_volume_issue_page(text: str) -> tuple[str | None, str | None, str | None]:
+    normalized = _normalize_reference_line(text)
+    patterns = [
+        r"(?P<volume>\d+)\s*\((?P<issue>[^)]+)\)\s*[:,]\s*(?P<page>[A-Za-z]?\d[\w\-–]*)",
+        r"(?P<volume>\d+)\s*[:,]\s*(?P<page>[A-Za-z]?\d[\w\-–]*)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, normalized)
+        if match:
+            return (
+                (match.groupdict().get("volume") or "").strip() or None,
+                (match.groupdict().get("issue") or "").strip() or None,
+                (match.groupdict().get("page") or "").strip() or None,
+            )
+    return None, None, None
+
+
+def _extract_article_number(page: str | None) -> str | None:
+    if not page:
+        return None
+    stripped = page.strip()
+    if re.fullmatch(r"[A-Za-z]?\d[\w-]*", stripped) and "-" not in stripped:
+        return stripped
+    return None
+
+
+def _extract_venue(ref_line: str, title: str | None) -> str | None:
+    normalized = _normalize_reference_line(ref_line)
+    tail = normalized
+    if title and title in normalized:
+        tail = normalized.split(title, 1)[1]
+    tail = re.sub(r"\bDOI:\s*10\.\S+", "", tail, flags=re.IGNORECASE)
+    year_match = re.search(r"(?<!\d)(?:19|20)\d{2}(?!\d)", tail)
+    if year_match:
+        tail = tail[:year_match.start()]
+    tail = tail.strip(" .,:;")
+    return tail or None
+
+
+def parse_reference_metadata(ref_line: str) -> ReferenceRecord:
+    normalized = _normalize_reference_line(ref_line)
+    title = extract_title_candidate(normalized)
+    if title:
+        title = re.sub(r",\s*arxiv.*$", "", title, flags=re.IGNORECASE).strip(" ,.;:")
+    authors = extract_authors(normalized)
+    year = _extract_year(normalized)
+    volume, issue, page = _extract_volume_issue_page(normalized)
+    venue = _extract_venue(normalized, title)
+    if "arxiv" in normalized.lower() and venue == "Available from":
+        venue = "arXiv"
+    article_number = _extract_article_number(page)
+    return ReferenceRecord(
+        title=title,
+        authors=authors,
+        year=year,
+        venue=venue,
+        volume=volume,
+        issue=issue,
+        page=page,
+        article_number=article_number,
+    )

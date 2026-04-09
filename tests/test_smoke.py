@@ -28,6 +28,7 @@ def test_cli_run_uses_markdown_output(tmp_path, monkeypatch):
         found=False,
         retracted=False,
         retraction_details=[],
+        status="not_found",
         note="no_match",
     )
 
@@ -69,6 +70,7 @@ def test_handle_check_returns_payload(monkeypatch):
             "found": False,
             "retracted": False,
             "retraction_details": [],
+            "status": "not_found",
             "method": "mock",
             "note": None,
             "candidates": None,

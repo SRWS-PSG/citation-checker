@@ -11,7 +11,7 @@
     <section class="hero">
       <p class="eyebrow">Citation Checker</p>
       <h1>CiteGuard Web</h1>
-      <p class="lede">参考文献テキストを貼り付けて、未発見・撤回・年注意・ウェブサイト参照をブラウザから確認できます。</p>
+      <p class="lede">参考文献テキストを貼り付けて、未発見・誤引用候補・撤回・年注意・ウェブサイト参照をブラウザから確認できます。</p>
       <div class="notice">
         <h3>データの取り扱い</h3>
         <ul>
@@ -45,7 +45,6 @@
 
       <div class="actions">
         <button id="run" type="button">チェック開始</button>
-        <button id="download" type="button" disabled>Markdown ダウンロード</button>
       </div>
 
       <p id="status" class="status">待機中</p>
@@ -57,6 +56,9 @@
         <p id="summary">まだ実行していません。</p>
       </div>
       <div id="results" class="results"></div>
+      <div class="actions">
+        <button id="download" type="button" disabled>レポートダウンロード</button>
+      </div>
     </section>
   </main>
 

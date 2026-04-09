@@ -3,7 +3,17 @@
     "allow": [
       "Bash(pip install:*)",
       "Bash(citeguard --input-file input/test_sample.bib --all)",
-      "Bash(PYTHONIOENCODING=utf-8 citeguard --input-file input/test_sample.bib --all)"
+      "Bash(PYTHONIOENCODING=utf-8 citeguard --input-file input/test_sample.bib --all)",
+      "Bash(curl -s -X POST http://localhost:3000/api/check -H \"Content-Type: application/json\" -d \"{\\\\\"ref\\\\\":\\\\\"Tan HS, Habib AS. The optimum management of nausea and vomiting during and after cesarean delivery. Best Pract Res Clin Anaesthesiol. 2020;34\\(4\\):735-47.\\\\\",\\\\\"email\\\\\":\\\\\"test@example.com\\\\\"}\")",
+      "Bash(netstat -ano)",
+      "Bash(taskkill //F //PID 32812)",
+      "Bash(kill 1877 1858)",
+      "Bash(python scripts/local_server.py)",
+      "Bash(python -m pytest tests/test_miscitation_detection.py -x -q)",
+      "Bash(python -m pytest -x -q)",
+      "Bash(powershell -Command 'Get-NetTCPConnection -LocalPort 3000 -ErrorAction SilentlyContinue | ForEach-Object { if \\($_.OwningProcess -ne 0\\) { Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue } }')",
+      "Bash(curl -s -X POST http://localhost:3000/api/check -H \"Content-Type: application/json\" -d \"{\\\\\"ref\\\\\":\\\\\"Efficacy of granisetron for the treatment of postoperative nausea and vomiting in women undergoing breast surgery: a randomised, double-blind, placebo-controlled trial. Clin Drug Investig. 2006;26\\(4\\):203-8. doi: 10.2165/00044011-200626040-00004.\\\\\",\\\\\"email\\\\\":\\\\\"test@example.com\\\\\"}\")",
+      "Bash(python -c \"import json,sys; r=json.load\\(sys.stdin\\)['result']; print\\('count:', len\\(r.get\\('retraction_details'\\) or []\\)\\)\")"
     ]
   }
 }

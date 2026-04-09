@@ -1,21 +1,36 @@
 from __future__ import annotations
 
-import time
-import urllib.parse
 from dataclasses import dataclass
-import re
-import unicodedata
+from datetime import datetime
+import time
+from typing import Literal
+import urllib.parse
 
 import requests
-from .parser import extract_title_candidate
-from .pubmed import PubMedClient
+
+from .arxiv import ArxivClient, ArxivMatch
 from .doi_resolver import DOIResolver
-from .arxiv import ArxivClient
+from .jalc import JALCClient
 from .etiquette import build_user_agent
+from .parser import (
+    contains_japanese_text,
+    extract_arxiv_id,
+    extract_doi,
+    extract_title_candidate,
+    is_website_reference,
+    parse_reference_metadata,
+)
+from .pubmed import PubMedClient, PubMedMatch
+from .scoring import (
+    CandidateScore,
+    ReferenceRecord,
+    normalize_author_name,
+    score_candidate,
+    year_similarity,
+)
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
-
 
 
 @dataclass
@@ -26,6 +41,7 @@ class MatchResult:
     found: bool
     retracted: bool
     retraction_details: list[dict]
+    status: Literal["found", "likely_wrong", "not_found", "website"] = "not_found"
     method: str | None = None
     note: str | None = None
     candidates: list[dict] | None = None
@@ -36,126 +52,69 @@ class MatchResult:
     arxiv_doi: str | None = None
     journal_ref: str | None = None
     is_website: bool = False
+    best_candidate: dict | None = None
+    comparison_summary: str | None = None
+    field_signals: dict[str, str] | None = None
+    field_diffs: dict[str, dict] | None = None
 
 
-_SYNONYMS = [
-    (r"\bcaeserean\b", "cesarean"),
-    (r"\bcaesarean\b", "cesarean"),
-    (r"\banaesthesia\b", "anesthesia"),
-    (r"\banaesthetic\b", "anesthetic"),
-    (r"\bhaemodynamics?\b", "hemodynamic"),
-    (r"\bhaemoglobin\b", "hemoglobin"),
-    (r"\bfoetus\b", "fetus"),
-    (r"\bfoetal\b", "fetal"),
-    (r"\brandomised\b", "randomized"),
-]
+@dataclass
+class CandidateMatch:
+    record: ReferenceRecord
+    method: str
+    score: CandidateScore
 
 
-def _apply_synonyms(s: str) -> str:
-    out = s
-    for pat, rep in _SYNONYMS:
-        out = re.sub(pat, rep, out)
-    return out
-
-
-def _normalize_text(s: str) -> str:
-    import html
-    s = html.unescape(s or "")
-    s = unicodedata.normalize("NFKC", s).lower()
-    s = re.sub(r"\s+", " ", s)
-    s = _apply_synonyms(s)
-    # remove punctuation-like characters but keep spaces and alnum
-    s = re.sub(r"[^\w\s]", "", s)
-    return re.sub(r"\s+", " ", s).strip()
-
-
-def _extract_years(text: str) -> list[int]:
-    """Extract all years from text after stripping DOIs/URLs."""
-    text = _strip_doi_from_text(text)
-    years = re.findall(r"\b((?:19|20)\d{2})\b", text)
-    return [int(y) for y in years]
-
-
-def _extract_year(text: str) -> int | None:
-    """Extract the last year from text (for backwards compatibility)."""
-    years = _extract_years(text)
-    return years[-1] if years else None
-
-
-def _has_alphabetic_content(text: str) -> bool:
-    return bool(re.search(r'[a-zA-Z]', text))
-
-
-def _strip_doi_from_text(text: str) -> str:
-    from .parser import extract_doi
-    doi = extract_doi(text)
-    if doi:
-        text = text.replace(doi, '')
-        text = re.sub(r'\bDOI:\s*', '', text, flags=re.IGNORECASE)
-    return text
-
-
-def _title_matches_strict(ref_line: str, candidate_title: str) -> bool:
-    if not candidate_title:
-        return False
-    
-    tit_n = _normalize_text(candidate_title)
-    if not tit_n:
-        return False
-    
-    if not _has_alphabetic_content(candidate_title):
-        return False
-    
-    if len(tit_n) < 10:
-        return False
-    
-    ref_stripped = _strip_doi_from_text(ref_line)
-    ref_n = _normalize_text(ref_stripped)
-    
-    if tit_n in ref_n or ref_n in tit_n:
-        return True
-    
-    tit_tokens = [t for t in tit_n.split() if len(t) > 2]
-    if not tit_tokens:
-        return False
-    missing = [t for t in tit_tokens if t not in ref_n]
-    
-    if len(missing) == 0:
-        return True
-    
-    if len(missing) == 1 and len(tit_tokens) >= 8:
-        missing_token = missing[0]
-        for ref_token in ref_n.split():
-            if len(ref_token) > 3 and len(missing_token) > 3:
-                if missing_token[:4] == ref_token[:4] or missing_token[-4:] == ref_token[-4:]:
-                    return True
-    
-    return False
+def _published_year(work: dict) -> int | None:
+    for field in ("published-print", "issued", "published-online"):
+        value = work.get(field)
+        if isinstance(value, dict):
+            parts = value.get("date-parts") or []
+            if parts and parts[0]:
+                return parts[0][0]
+    return None
 
 
 def _extract_crossref_authors(work: dict) -> list[str]:
-    authors = []
+    authors: list[str] = []
     for author in work.get("author", []):
-        family = author.get("family", "")
+        family = normalize_author_name(author.get("family") or author.get("name") or "")
         if family:
-            family_normalized = unicodedata.normalize('NFKC', family)
-            family_normalized = re.sub(r'[^\w\s-]', '', family_normalized)
-            family_normalized = family_normalized.lower().strip()
-            if family_normalized:
-                authors.append(family_normalized)
+            authors.append(family)
     return authors
 
 
-def _authors_match(input_authors: list[str], crossref_authors: list[str]) -> bool:
-    if not input_authors or not crossref_authors:
-        return True
-    
-    for inp_author in input_authors:
-        for cr_author in crossref_authors:
-            if inp_author == cr_author or inp_author in cr_author or cr_author in inp_author:
-                return True
-    
-    return False
+def _page_to_article_number(page: str | None) -> str | None:
+    if not page:
+        return None
+    if "-" in page:
+        return None
+    return page.strip()
+
+
+def _is_preprint_work(work: dict) -> bool:
+    work_type = (work.get("type") or "").lower()
+    container = " ".join(work.get("container-title") or []).lower()
+    return work_type == "posted-content" or "preprint" in container or "arxiv" in container
+
+
+def _merge_records(primary: ReferenceRecord, secondary: ReferenceRecord | None) -> ReferenceRecord:
+    if secondary is None:
+        return primary
+    return ReferenceRecord(
+        title=primary.title or secondary.title,
+        authors=primary.authors or secondary.authors,
+        year=primary.year or secondary.year,
+        venue=primary.venue or secondary.venue,
+        volume=primary.volume or secondary.volume,
+        issue=primary.issue or secondary.issue,
+        page=primary.page or secondary.page,
+        article_number=primary.article_number or secondary.article_number,
+        doi=primary.doi or secondary.doi,
+        source=primary.source or secondary.source,
+        source_id=primary.source_id or secondary.source_id,
+        is_preprint=primary.is_preprint and secondary.is_preprint,
+    )
 
 
 class CrossrefClient:
@@ -172,19 +131,18 @@ class CrossrefClient:
         self.strict = strict
         self.debug = debug
         self.email = email
+        self._doi_cache: dict[str, tuple[dict | None, str]] = {}
 
     def _get(self, url: str, params: dict | None = None):
         try:
-            r = self.session.get(url, params=params, timeout=30)
-            r.raise_for_status()
+            response = self.session.get(url, params=params, timeout=30)
+            response.raise_for_status()
             time.sleep(self.pause_sec)
-            return r.json()
+            return response.json()
         except requests.RequestException:
-            # Network/API failure: degrade gracefully so pipeline can complete
             return None
 
     def search_bibliographic(self, ref: str) -> dict | None:
-        # Backward compatible: return top item if any
         items = self.search_bibliographic_items(ref)
         return items[0] if items else None
 
@@ -192,386 +150,500 @@ class CrossrefClient:
         params = {
             "query.bibliographic": ref,
             "rows": rows,
-            "select": "DOI,title,issued,published-print,published-online,container-title,volume,issue,page,type",
+            "select": "DOI,title,issued,published-print,published-online,container-title,volume,issue,page,type,author",
         }
-        js = self._get(API, params)
-        if not js:
+        payload = self._get(API, params)
+        if not payload:
             return []
-        return js.get("message", {}).get("items", [])
+        return payload.get("message", {}).get("items", [])
 
     def get_work(self, doi: str) -> dict | None:
-        url = f"{API}/{urllib.parse.quote(doi)}"
-        # 'select' is not supported on works/{doi}; fetch full and pick fields
-        js = self._get(url, params=None)
-        if not js:
+        payload = self._get(f"{API}/{urllib.parse.quote(doi)}")
+        if not payload:
             return None
-        return js.get("message", None)
+        return payload.get("message")
 
     def find_updates_for(self, doi: str) -> list[dict]:
-        params = {
-            "filter": f"updates:{doi},is-update:true",
-            "rows": 1000,
-        }
-        js = self._get(API, params)
-        if not js:
+        payload = self._get(API, {"filter": f"updates:{doi},is-update:true", "rows": 1000})
+        if not payload:
             return []
-        return js.get("message", {}).get("items", [])
+        return payload.get("message", {}).get("items", [])
 
-    def is_retracted(self, doi: str) -> tuple[bool, list[dict]]:
+    def is_retracted(self, doi: str | None) -> tuple[bool, list[dict]]:
+        if not doi:
+            return False, []
         notices = self.find_updates_for(doi)
         hits: list[dict] = []
-        for n in notices:
-            for ut in n.get("update-to", []):
-                ut_type = (ut.get("type") or "").lower()
-                if ut_type in RETRACTION_TYPES:
-                    hits.append(
-                        {
-                            "notice_doi": n.get("DOI"),
-                            "update_type": ut.get("type"),
-                            "source": ut.get("source"),
-                            "updated": ut.get("updated", {}),
-                            "label": ut.get("label"),
-                        }
-                    )
-        return (len(hits) > 0, hits)
+        seen: set[tuple[str | None, str | None]] = set()
+        for notice in notices:
+            for update in notice.get("update-to", []):
+                update_type = (update.get("type") or "").lower()
+                if update_type not in RETRACTION_TYPES:
+                    continue
+                key = (notice.get("DOI"), update_type)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(
+                    {
+                        "notice_doi": notice.get("DOI"),
+                        "update_type": update.get("type"),
+                        "source": update.get("source"),
+                        "updated": update.get("updated", {}),
+                        "label": update.get("label"),
+                    }
+                )
+        return bool(hits), hits
 
     def _doi_metadata_to_work(self, doi_meta) -> dict:
-        """
-        Convert DOIMetadata from doi_resolver to a work dict compatible with Crossref format.
-        This allows unified processing of metadata from different RAs.
-        """
         work = {
             "DOI": doi_meta.doi,
             "title": [doi_meta.title] if doi_meta.title else [],
             "author": [
-                {"family": a.get("family", ""), "given": a.get("given", "")}
-                for a in doi_meta.authors
+                {"family": author.get("family", ""), "given": author.get("given", "")}
+                for author in doi_meta.authors
             ],
             "container-title": [doi_meta.container_title] if doi_meta.container_title else [],
             "volume": doi_meta.volume,
             "issue": doi_meta.issue,
             "page": doi_meta.page,
+            "type": "journal-article",
         }
-        
         if doi_meta.year:
             work["issued"] = {"date-parts": [[doi_meta.year]]}
-        
         return work
 
+    def _resolve_doi_work(self, doi: str) -> tuple[dict | None, str]:
+        if doi in self._doi_cache:
+            return self._doi_cache[doi]
+
+        resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email)
+        ra = resolver.detect_ra(doi)
+        if ra == "Crossref":
+            result = (self.get_work(doi), "doi-crossref")
+            self._doi_cache[doi] = result
+            return result
+        if ra == "DataCite":
+            doi_meta = resolver.resolve_via_datacite(doi)
+            result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-datacite")
+            self._doi_cache[doi] = result
+            return result
+        if ra == "JaLC":
+            doi_meta = resolver.resolve_via_content_negotiation(doi)
+            result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-jalc")
+            self._doi_cache[doi] = result
+            return result
+        if ra:
+            doi_meta = resolver.resolve_via_content_negotiation(doi)
+            result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), f"doi-{ra.lower()}")
+            self._doi_cache[doi] = result
+            return result
+
+        work = self.get_work(doi)
+        if work:
+            result = (work, "doi-crossref")
+            self._doi_cache[doi] = result
+            return result
+        doi_meta = resolver.resolve_via_content_negotiation(doi)
+        result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-content-negotiation")
+        self._doi_cache[doi] = result
+        return result
+
+    def _work_to_record(self, work: dict, source: str, source_id: str | None = None) -> ReferenceRecord:
+        page = work.get("page")
+        return ReferenceRecord(
+            title=(work.get("title") or [None])[0],
+            authors=_extract_crossref_authors(work),
+            year=_published_year(work),
+            venue=(work.get("container-title") or [None])[0],
+            volume=work.get("volume"),
+            issue=work.get("issue"),
+            page=page,
+            article_number=_page_to_article_number(page),
+            doi=work.get("DOI"),
+            source=source,
+            source_id=source_id,
+            is_preprint=_is_preprint_work(work),
+        )
+
+    def _pubmed_to_record(self, hit: PubMedMatch) -> ReferenceRecord:
+        return ReferenceRecord(
+            title=hit.title,
+            authors=[normalize_author_name(author) for author in hit.authors if normalize_author_name(author)],
+            year=hit.year,
+            venue=hit.journal,
+            volume=hit.volume,
+            issue=hit.issue,
+            page=hit.pages,
+            article_number=_page_to_article_number(hit.pages),
+            doi=hit.doi,
+            source="pubmed",
+            source_id=hit.pmid,
+        )
+
+    def _arxiv_to_record(self, match: ArxivMatch) -> ReferenceRecord:
+        year = None
+        if match.published:
+            try:
+                year = datetime.fromisoformat(match.published.replace("Z", "+00:00")).year
+            except ValueError:
+                year = None
+        authors = [normalize_author_name(author) for author in match.authors if normalize_author_name(author)]
+        return ReferenceRecord(
+            title=match.title,
+            authors=authors,
+            year=year,
+            venue=match.journal_ref or "arXiv",
+            page=None,
+            article_number=None,
+            doi=match.doi,
+            source="arxiv",
+            source_id=match.arxiv_id,
+            is_preprint=True,
+        )
+
+    def _candidate_payload(self, candidate: CandidateMatch) -> dict:
+        record = candidate.record
+        return {
+            "title": record.title,
+            "doi": record.doi,
+            "source": record.source,
+            "method": candidate.method,
+            "score": candidate.score.total,
+            "decision": candidate.score.decision,
+            "field_summary": candidate.score.summary,
+            "field_states": candidate.score.field_states,
+            "field_diffs": candidate.score.field_diffs,
+            "signals": candidate.score.signals,
+            "year": record.year,
+            "container": record.venue,
+            "page": record.page,
+            "volume": record.volume,
+            "issue": record.issue,
+        }
+
+    def _result_from_candidate(
+        self,
+        input_text: str,
+        input_record: ReferenceRecord,
+        candidate: CandidateMatch,
+        status: Literal["found", "likely_wrong"],
+        note: str | None,
+        extra_candidates: list[CandidateMatch] | None = None,
+        arxiv_id: str | None = None,
+        arxiv_doi: str | None = None,
+        journal_ref: str | None = None,
+    ) -> MatchResult:
+        retracted, details = self.is_retracted(candidate.record.doi)
+        candidates_payload = [self._candidate_payload(item) for item in (extra_candidates or [])] or None
+        suggestions = None
+        if candidates_payload:
+            suggestions = [
+                f"{item['title']} ({item.get('doi') or 'DOIなし'})"
+                for item in candidates_payload
+                if item.get("title")
+            ] or None
+        return MatchResult(
+            input_text=input_text,
+            doi=candidate.record.doi,
+            title=candidate.record.title,
+            found=status == "found",
+            retracted=retracted,
+            retraction_details=details,
+            status=status,
+            method=candidate.method,
+            note=note,
+            candidates=candidates_payload,
+            suggestions=suggestions,
+            input_authors=input_record.authors or None,
+            matched_authors=candidate.record.authors[:5] or None,
+            arxiv_id=arxiv_id,
+            arxiv_doi=arxiv_doi,
+            journal_ref=journal_ref,
+            best_candidate=self._candidate_payload(candidate),
+            comparison_summary=candidate.score.summary,
+            field_signals=candidate.score.field_states,
+            field_diffs=candidate.score.field_diffs,
+        )
+
+    def _sort_candidates(self, candidates: list[CandidateMatch]) -> list[CandidateMatch]:
+        decision_rank = {"accept": 2, "suggest": 1, "reject": 0}
+        return sorted(
+            candidates,
+            key=lambda candidate: (
+                decision_rank[candidate.score.decision],
+                candidate.score.total,
+                0 if candidate.record.is_preprint else 1,
+            ),
+            reverse=True,
+        )
+
+    def _enrich_pubmed_candidate(
+        self,
+        input_record: ReferenceRecord,
+        candidate: CandidateMatch,
+        mode: Literal["verification", "correction"],
+    ) -> CandidateMatch:
+        if not candidate.method.startswith("pubmed") or not candidate.record.doi:
+            return candidate
+
+        work, doi_method = self._resolve_doi_work(candidate.record.doi)
+        if not work:
+            return candidate
+
+        enriched_record = _merge_records(
+            candidate.record,
+            self._work_to_record(work, source="pubmed-doi", source_id=candidate.record.source_id),
+        )
+        enriched_score = score_candidate(
+            input_record,
+            enriched_record,
+            mode=mode,
+            strict=self.strict,
+        )
+        return CandidateMatch(
+            record=enriched_record,
+            method=f"{candidate.method}+{doi_method}",
+            score=enriched_score,
+        )
+
+    def _collect_crossref_candidates(self, input_text: str) -> list[tuple[ReferenceRecord, str]]:
+        items = self.search_bibliographic_items(input_text, rows=5)
+        return [(self._work_to_record(item, source="crossref"), "bibliographic") for item in items]
+
+    def _collect_pubmed_candidates(self, input_text: str, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
+        pubmed = PubMedClient(email=self.email)
+        seen: set[tuple[str | None, str | None]] = set()
+        collected: list[tuple[ReferenceRecord, str]] = []
+        for hit in pubmed.search_full_citation(input_text):
+            record = self._pubmed_to_record(hit)
+            key = (record.doi, record.title)
+            if key not in seen:
+                seen.add(key)
+                collected.append((record, "pubmed-full-citation"))
+        if title_guess:
+            for hit in pubmed.search_title_exact(title_guess):
+                record = self._pubmed_to_record(hit)
+                key = (record.doi, record.title)
+                if key not in seen:
+                    seen.add(key)
+                    collected.append((record, "pubmed-title"))
+        return collected
+
+    def _collect_arxiv_candidates(
+        self,
+        arxiv_id: str | None,
+        title_guess: str | None,
+        input_authors: list[str],
+    ) -> tuple[list[tuple[ReferenceRecord, str]], str | None, str | None, str | None]:
+        if not arxiv_id and not title_guess:
+            return [], None, None, None
+
+        arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
+        collected: list[tuple[ReferenceRecord, str]] = []
+        match: ArxivMatch | None = None
+        method = "arxiv-no-query"
+        if arxiv_id:
+            match, method = arxiv.verify_reference(arxiv_id=arxiv_id)
+        elif title_guess:
+            match, method = arxiv.verify_reference(title=title_guess, authors=input_authors)
+
+        if not match:
+            return [], arxiv_id, None, None
+
+        arxiv_record = self._arxiv_to_record(match)
+        collected.append((arxiv_record, method))
+        if match.doi:
+            work, doi_method = self._resolve_doi_work(match.doi)
+            if work:
+                collected.insert(0, (self._work_to_record(work, source="arxiv-published"), doi_method))
+        elif match.title:
+            query = f"{match.title} {' '.join(input_authors[:2])}".strip()
+            for item in self.search_bibliographic_items(query, rows=3):
+                collected.append((self._work_to_record(item, source="arxiv-crossref"), "arxiv-crossref"))
+        return collected, match.arxiv_id, match.doi, match.journal_ref
+
+    def _collect_jalc_candidates(self, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
+        if not title_guess or not contains_japanese_text(title_guess):
+            return []
+
+        jalc = JALCClient(pause_sec=self.pause_sec, email=self.email)
+        collected: list[tuple[ReferenceRecord, str]] = []
+        for hit in jalc.search_title(title_guess, rows=5):
+            doi = hit.get("doi")
+            title = hit.get("title")
+            if not doi:
+                continue
+            work, doi_method = self._resolve_doi_work(doi)
+            if work:
+                collected.append((self._work_to_record(work, source="jalc", source_id=doi), f"jalc-title+{doi_method}"))
+                continue
+            collected.append(
+                (
+                    ReferenceRecord(
+                        title=title,
+                        doi=doi,
+                        source="jalc-search",
+                        source_id=doi,
+                    ),
+                    "jalc-title",
+                )
+            )
+        return collected
+
+    def _evaluate_candidates(
+        self,
+        input_record: ReferenceRecord,
+        raw_candidates: list[tuple[ReferenceRecord, str]],
+        mode: Literal["verification", "correction"] = "verification",
+    ) -> list[CandidateMatch]:
+        deduped: list[tuple[ReferenceRecord, str]] = []
+        seen: set[tuple[str | None, str | None, str | None]] = set()
+        for record, method in raw_candidates:
+            key = (record.doi, record.title, record.source_id)
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append((record, method))
+
+        evaluated = [
+            CandidateMatch(
+                record=record,
+                method=method,
+                score=score_candidate(input_record, record, mode=mode, strict=self.strict),
+            )
+            for record, method in deduped
+        ]
+        if mode == "verification":
+            enriched: list[CandidateMatch] = []
+            for candidate in evaluated:
+                if candidate.score.decision == "accept":
+                    candidate = self._enrich_pubmed_candidate(input_record, candidate, mode)
+                enriched.append(candidate)
+            evaluated = enriched
+        return self._sort_candidates(evaluated)
+
     def check_one(self, input_text: str) -> MatchResult:
-        from .parser import extract_doi, extract_authors, extract_arxiv_id, is_website_reference
+        input_record = parse_reference_metadata(input_text)
+        input_doi = extract_doi(input_text)
+        input_arxiv_id = extract_arxiv_id(input_text)
+        title_guess = input_record.title or extract_title_candidate(input_text)
 
-        input_authors = extract_authors(input_text)
-        doi = extract_doi(input_text)
-        arxiv_id = extract_arxiv_id(input_text)
-        work = None
-        method: str | None = None
-
-        # Step 0: Check if this is a website/software reference
         if is_website_reference(input_text):
             return MatchResult(
-                input_text,
+                input_text=input_text,
                 doi=None,
                 title=None,
                 found=True,
                 retracted=False,
                 retraction_details=[],
+                status="website",
                 method="website",
                 note="website_reference",
                 is_website=True,
+                input_authors=input_record.authors or None,
             )
 
-        # Step 1: If arXiv ID is present (and no DOI), use arXiv API as primary source
-        if arxiv_id and not doi:
-            arxiv_client = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
-            arxiv_match, arxiv_method = arxiv_client.verify_reference(
-                arxiv_id=arxiv_id,
-            )
-            if arxiv_match:
-                # arXiv paper found - check retraction if DOI available
-                retracted, details = (False, [])
-                if arxiv_match.doi:
-                    retracted, details = self.is_retracted(arxiv_match.doi)
+        if input_doi:
+            work, method = self._resolve_doi_work(input_doi)
+            if not work:
                 return MatchResult(
-                    input_text,
-                    doi=arxiv_match.doi,
-                    title=arxiv_match.title,
-                    found=True,
-                    retracted=retracted,
-                    retraction_details=details,
-                    method=arxiv_method,
-                    note=None,
-                    arxiv_id=arxiv_match.arxiv_id,
-                    arxiv_doi=arxiv_match.doi,
-                    journal_ref=arxiv_match.journal_ref,
-                    input_authors=input_authors,
-                )
-            else:
-                # arXiv ID not found
-                return MatchResult(
-                    input_text,
-                    doi=None,
+                    input_text=input_text,
+                    doi=input_doi,
                     title=None,
                     found=False,
                     retracted=False,
                     retraction_details=[],
-                    method=arxiv_method,
-                    note="arxiv_not_found",
-                    suggestions=[
-                        f"arXiv ID未発見: {arxiv_id}",
-                        f"arXiv.orgで確認: https://arxiv.org/abs/{arxiv_id}",
-                    ],
-                    arxiv_id=arxiv_id,
-                )
-
-        if doi:
-            # Step 0: Input has DOI - treat it as authoritative identity (never swap for different DOI)
-            # Step 1: Detect Registration Agency via doiRA
-            resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email)
-            ra = resolver.detect_ra(doi)
-            
-            # Step 2: Try RA-specific API or content negotiation
-            if ra == "Crossref":
-                method = "doi-crossref"
-                work = self.get_work(doi)
-            elif ra == "DataCite":
-                method = "doi-datacite"
-                doi_meta = resolver.resolve_via_datacite(doi)
-                if doi_meta:
-                    work = self._doi_metadata_to_work(doi_meta)
-            elif ra == "JaLC":
-                method = "doi-jalc"
-                doi_meta = resolver.resolve_via_content_negotiation(doi)
-                if doi_meta:
-                    work = self._doi_metadata_to_work(doi_meta)
-            elif ra:
-                # Other RA (mEDRA, CNKI, etc.) - use content negotiation
-                method = f"doi-{ra.lower()}"
-                doi_meta = resolver.resolve_via_content_negotiation(doi)
-                if doi_meta:
-                    work = self._doi_metadata_to_work(doi_meta)
-            else:
-                # RA detection failed - try Crossref first, then content negotiation
-                method = "doi"
-                work = self.get_work(doi)
-                if not work:
-                    method = "doi-content-negotiation"
-                    doi_meta = resolver.resolve_via_content_negotiation(doi)
-                    if doi_meta:
-                        work = self._doi_metadata_to_work(doi_meta)
-            
-            # If DOI resolution failed completely, return "DOI not resolved" instead of
-            # falling back to bibliographic search (which could return a different DOI)
-            if not work:
-                suggestions = [
-                    f"DOI解決失敗: {doi}",
-                    f"RA: {ra or '不明'}",
-                    f"doi.orgで確認: https://doi.org/{doi}",
-                ]
-                return MatchResult(
-                    input_text,
-                    doi,  # Keep the input DOI
-                    None,
-                    found=False,
-                    retracted=False,
-                    retraction_details=[],
+                    status="not_found",
                     method=method,
                     note="doi_not_resolved",
-                    candidates=None,
-                    suggestions=suggestions,
-                )
-        else:
-            # No DOI in input - use bibliographic search with fallbacks
-            method = "bibliographic"
-            for cand in self.search_bibliographic_items(input_text):
-                title = (cand.get("title") or [None])[0]
-                if self.strict:
-                    if not _title_matches_strict(input_text, title):
-                        continue
-                    cand_authors = _extract_crossref_authors(cand)
-                    if input_authors and not _authors_match(input_authors, cand_authors):
-                        continue
-                work = cand
-                break
-
-            if not work:
-                pm = PubMedClient(email=self.email)
-                
-                # Fallback 1: try PubMed full citation search
-                pm_hits = pm.search_full_citation(input_text)
-                if pm_hits:
-                    chosen = pm_hits[0]
-                    retracted, details = (False, [])
-                    if chosen.doi:
-                        retracted, details = self.is_retracted(chosen.doi)
-                    return MatchResult(
-                        input_text,
-                        chosen.doi,
-                        chosen.title,
-                        found=True,
-                        retracted=retracted,
-                        retraction_details=details,
-                        method="pubmed-full-citation",
-                        note=None,
-                        candidates=None,
-                    )
-                
-                # Fallback 2: try PubMed exact title match when Crossref has no hit
-                title_guess = extract_title_candidate(input_text) or ""
-                if title_guess:
-                    pm_hits = pm.search_title_exact(title_guess)
-                    chosen = None
-                    for hit in pm_hits:
-                        if _normalize_text(hit.title) == _normalize_text(title_guess):
-                            chosen = hit
-                            break
-                    if chosen:
-                        retracted, details = (False, [])
-                        if chosen.doi:
-                            retracted, details = self.is_retracted(chosen.doi)
-                        return MatchResult(
-                            input_text,
-                            chosen.doi,
-                            chosen.title,
-                            found=True,
-                            retracted=retracted,
-                            retraction_details=details,
-                            method="pubmed-title",
-                            note=None,
-                            candidates=None,
-                        )
-
-                # Fallback 3: try arXiv title search
-                if title_guess:
-                    arxiv_client = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
-                    arxiv_match, arxiv_method = arxiv_client.verify_reference(
-                        title=title_guess,
-                        authors=input_authors,
-                    )
-                    if arxiv_match:
-                        retracted, details = (False, [])
-                        if arxiv_match.doi:
-                            retracted, details = self.is_retracted(arxiv_match.doi)
-                        return MatchResult(
-                            input_text,
-                            doi=arxiv_match.doi,
-                            title=arxiv_match.title,
-                            found=True,
-                            retracted=retracted,
-                            retraction_details=details,
-                            method=arxiv_method,
-                            note=None,
-                            arxiv_id=arxiv_match.arxiv_id,
-                            arxiv_doi=arxiv_match.doi,
-                            journal_ref=arxiv_match.journal_ref,
-                            input_authors=input_authors,
-                        )
-
-                cands = None
-                suggestions: list[str] = []
-                if title_guess:
-                    suggestions.append(f"タイトル候補でウェブ検索: \"{title_guess}\"")
-                    search_url = "https://www.google.com/search?q=" + urllib.parse.quote_plus(title_guess)
-                    suggestions.append(f"Google検索: {search_url}")
-                suggestions = suggestions or None
-                if self.debug:
-                    # collect top 3 candidates for troubleshooting
-                    cands = []
-                    for cand in self.search_bibliographic_items(input_text, rows=3):
-                        cands.append({
-                            "DOI": cand.get("DOI"),
-                            "title": (cand.get("title") or [None])[0],
-                            "year": (cand.get("published-print") or cand.get("issued") or {}).get("date-parts", [[None]])[0][0],
-                            "container": (cand.get("container-title") or [None])[0],
-                            "page": cand.get("page"),
-                        })
-                return MatchResult(
-                    input_text,
-                    None,
-                    None,
-                    found=False,
-                    retracted=False,
-                    retraction_details=[],
-                    method=method,
-                    note="no_match",
-                    candidates=cands,
-                    suggestions=suggestions,
+                    input_authors=input_record.authors or None,
+                    suggestions=[
+                        f"DOI解決失敗: {input_doi}",
+                        f"doi.orgで確認: https://doi.org/{input_doi}",
+                    ],
                 )
 
-        # If strict (and not direct DOI resolution), enforce title and year checks
-        # Skip strict validation for DOI-based methods where we trust the DOI resolution
-        is_doi_based = method and method.startswith("doi")
-        title = (work.get("title") or [None])[0]
-        if self.strict and not is_doi_based and title and not _title_matches_strict(input_text, title):
-            return MatchResult(
+            record = self._work_to_record(work, source="doi", source_id=input_doi)
+            score = score_candidate(input_record, record, mode="verification", strict=self.strict)
+            note = None
+            if input_record.year is not None and record.year is not None and year_similarity(input_record.year, record.year) == 0.7:
+                note = "year_warning"
+            candidate = CandidateMatch(record=record, method=method, score=score)
+            status: Literal["found", "likely_wrong"] = "found" if score.decision == "accept" else "likely_wrong"
+            if status == "likely_wrong":
+                note = score.note or note or "candidate_mismatch"
+            return self._result_from_candidate(input_text, input_record, candidate, status, note)
+
+        raw_candidates = self._collect_crossref_candidates(input_text)
+        raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
+        arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
+            input_arxiv_id,
+            title_guess,
+            input_record.authors,
+        )
+        raw_candidates.extend(arxiv_candidates)
+        raw_candidates.extend(self._collect_jalc_candidates(title_guess))
+
+        verified = self._evaluate_candidates(input_record, raw_candidates, mode="verification")
+        accepted = [candidate for candidate in verified if candidate.score.decision == "accept"]
+        if accepted:
+            chosen = accepted[0]
+            note = None
+            if input_record.year is not None and chosen.record.year is not None and year_similarity(input_record.year, chosen.record.year) == 0.7:
+                note = "year_warning"
+            return self._result_from_candidate(
                 input_text,
-                None,
-                None,
-                found=False,
-                retracted=False,
-                retraction_details=[],
-                method=method,
-                note="title_mismatch",
-                candidates=None,
+                input_record,
+                chosen,
+                "found",
+                note,
+                arxiv_id=arxiv_id,
+                arxiv_doi=arxiv_doi,
+                journal_ref=journal_ref,
             )
 
-        ref_years = _extract_years(input_text)
-        def year_from(field: str) -> int | None:
-            obj = work.get(field, {})
-            if isinstance(obj, dict):
-                parts = obj.get("date-parts") or []
-                if parts and parts[0]:
-                    return parts[0][0]
-            return None
-
-        candidate_years = set()
-        for field in ["published-print", "issued", "published-online"]:
-            y = year_from(field)
-            if y:
-                candidate_years.add(y)
-
-        # Check if ANY reference year matches ANY candidate year (within ±1)
-        year_note = None
-        if self.strict and not is_doi_based and ref_years and candidate_years:
-            min_diff = min(
-                abs(ry - cy)
-                for ry in ref_years
-                for cy in candidate_years
-            )
-            if min_diff > 1:
-                # Title/author match but year doesn't - mark as warning instead of rejection
-                year_note = "year_warning"
-
-        crossref_authors = _extract_crossref_authors(work)
-        if input_authors and crossref_authors and not _authors_match(input_authors, crossref_authors):
-            return MatchResult(
+        correction = self._evaluate_candidates(input_record, raw_candidates, mode="correction")
+        suggestions = [candidate for candidate in correction if candidate.score.decision == "suggest"]
+        if suggestions:
+            chosen = suggestions[0]
+            top = suggestions[:3]
+            note = chosen.score.note or "candidate_mismatch"
+            return self._result_from_candidate(
                 input_text,
-                None,
-                None,
-                found=False,
-                retracted=False,
-                retraction_details=[],
-                method=method,
-                note="author_mismatch",
-                candidates=None,
-                suggestions=None,
-                input_authors=input_authors,
-                matched_authors=crossref_authors[:5],
+                input_record,
+                chosen,
+                "likely_wrong",
+                note,
+                extra_candidates=top,
+                arxiv_id=arxiv_id,
+                arxiv_doi=arxiv_doi,
+                journal_ref=journal_ref,
             )
 
-        doi = work.get("DOI")
-        retracted, details = self.is_retracted(doi)
+        debug_candidates = None
+        if self.debug and correction:
+            debug_candidates = [self._candidate_payload(candidate) for candidate in correction[:3]]
+        suggestions_text = None
+        if title_guess:
+            suggestions_text = [
+                f"タイトル候補でウェブ検索: \"{title_guess}\"",
+                "Google検索: https://www.google.com/search?q=" + urllib.parse.quote_plus(title_guess),
+            ]
         return MatchResult(
-            input_text,
-            doi,
-            title,
-            found=True,
-            retracted=retracted,
-            retraction_details=details,
-            method=method,
-            note=year_note,
-            candidates=None,
-            suggestions=None,
-            input_authors=input_authors,
-            matched_authors=crossref_authors[:5] if crossref_authors else None,
+            input_text=input_text,
+            doi=None,
+            title=None,
+            found=False,
+            retracted=False,
+            retraction_details=[],
+            status="not_found",
+            method="bibliographic",
+            note="no_match",
+            candidates=debug_candidates,
+            suggestions=suggestions_text,
+            input_authors=input_record.authors or None,
+            arxiv_id=arxiv_id,
+            arxiv_doi=arxiv_doi,
+            journal_ref=journal_ref,
         )
