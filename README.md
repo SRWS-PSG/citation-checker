@@ -1,38 +1,194 @@
 # citeguard
 
-学術参考文献を Crossref・PubMed・arXiv・JaLC の API で照合し、**存在しない引用**や**撤回（Retraction / Withdrawal / Removal）された論文**を検出するツールです。CLI に加えて、Vercel へ配置できる Web UI も含みます。DOI が Crossref 以外の登録機関（DataCite・JaLC 等）に属する場合も自動でフォールバック解決します。
+学術参考文献を Crossref・PubMed・arXiv・JaLC で照合し、**未発見**・**撤回**だけでなく、**誤引用の可能性が高い書誌**も拾い上げる reference checker です。CLI に加えて、Vercel に配置できる Web UI / API を含みます。DOI が Crossref 以外の登録機関に属する場合も自動でフォールバック解決します。
 
 ```bash
 pip install citeguard
 ```
 
+## できること
+
+- 1行1書誌のテキスト、または BibTeX をそのまま入力できる
+- DOI、Crossref 書誌検索、PubMed、arXiv、JaLC を横断して候補を集める
+- 厳格一致した書誌は `found`、怪しい一致は `likely_wrong`、見つからない書誌は `not_found` として分類する
+- Crossref の更新通知から `retraction` / `withdrawal` / `removal` / `partial_retraction` を検出する
+- URL主体のウェブサイト参照やソフトウェア参照は `website` として学術DB検索をスキップする
+- Markdown レポートを stdout またはファイルに出力できる
+
 ## インストール
 
-### PyPI（推奨）
+### PyPI
+
 ```bash
 pip install citeguard
 ```
 
 ### 開発用セットアップ
+
 ```bash
 git clone https://github.com/SRWS-PSG/citation-checker.git
 cd citation-checker
 python -m venv .venv && . .venv/bin/activate
 pip install -e ".[dev]"
-cp .env.example .env   # CONTACT_EMAIL を編集
+cp .env.example .env
 ```
 
-## Web UI
+`.env` では `CONTACT_EMAIL` を設定できます。CLI では `--email`、Web API ではリクエストごとの `email` でも指定できます。
 
-`public/` に静的フロントエンド、`api/check.py` に Vercel Python Serverless Function を含みます。ブラウザから参考文献を貼り付けて逐次チェックできます。
+## クイックスタート
+
+```bash
+# テキストファイルを検証
+citeguard --input-file input/references.txt
+
+# レポートを保存
+citeguard --input-file input/references.txt --out outputs/report.md
+
+# BibTeX もそのまま渡せる
+citeguard --input-file input/test_sample.bib
+
+# インラインテキスト
+citeguard --text "Smith J. 2019. Some Title. J Example. DOI: 10.1234/abcd"
+
+# stdin
+cat input/references.txt | citeguard
+
+# python -m でも実行可能
+python -m refaudit --input-file input/references.txt
+```
+
+## 判定ステータス
+
+- `found`: 十分な一致があり、通常の照合結果として採用された
+- `likely_wrong`: 近い候補は見つかったが、タイトル・著者・掲載誌・ページなどにズレがあり、誤引用の可能性が高い
+- `not_found`: 候補が見つからない、または DOI を解決できない
+- `website`: ウェブサイト/ソフトウェア参照と判定され、学術DB検索を行わない
+
+`likely_wrong` はこのブランチで強化した中心機能です。単なる `no_match` ではなく、**最有力候補、DOI、項目ごとの差分、修正候補**を返します。
+
+## CLI
+
+### 主なオプション
+
+| オプション | 説明 |
+|---|---|
+| `--input-file PATH` | 参考文献ファイル。プレーンテキストまたは BibTeX を自動判別 |
+| `--text TEXT` | インライン参考文献テキスト |
+| `--out PATH` | Markdown レポート出力先。省略時は stdout |
+| `--all` | 正常な書誌も含めた全件レポートを出力 |
+| `--debug` | 候補不採用時の候補情報を多めに出す |
+| `--email EMAIL` | Crossref / PubMed 向けの連絡先メールアドレス |
+| `--version` | バージョン表示 |
+
+入力は `--text` と `--input-file` が排他です。どちらも指定しない場合は stdin を読みます。
+
+## 入力形式
+
+### プレーンテキスト
+
+- 1行 = 1書誌
+- 行頭の `[1]`、`1.`、`1)` などは自動で除去
+- DOI を含む場合は DOI 解決を優先
+- `arXiv:2307.06464` や `2307.06464` のような arXiv ID も抽出
+- 日本語文献や `・` 区切り著者にも対応
+- URL主体の行やソフトウェア参照は `website` としてスキップ
+
+### BibTeX
+
+- `@article`、`@book`、`@inproceedings` など主要エントリを自動検出
+- `author`、`title`、`year`、`doi`、`eprint` を使って照合
+- 特別なフラグは不要
+
+```bash
+citeguard --input-file references.bib
+```
+
+## 検索と判定の流れ
+
+1. DOI があれば Multi-RA で解決する
+2. arXiv ID があれば arXiv API を確認する
+3. Crossref `query.bibliographic` で候補を集める
+4. PubMed で全文引用・タイトル検索を行う
+5. 和文タイトルなら JaLC を検索する
+6. arXiv タイトル/著者検索も候補源として使う
+7. 候補を共通スコアリングで評価する
+
+判定は2段階です。
+
+- `verification`: タイトル・著者・年・掲載先・巻号ページの一致を厳しめに判定し、`found` を決める
+- `correction`: `found` に届かなかった候補を再評価し、誤引用らしいものを `likely_wrong` として返す
+
+このため、以前は `no_match` に落ちていたケースでも、近い候補があれば修正候補付きで報告されます。
+
+## 撤回判定
+
+- DOI が得られた場合、Crossref `filter=updates:{DOI},is-update:true` で更新通知を取得します
+- `update-to[].type` が `retraction` / `withdrawal` / `removal` / `partial_retraction` なら撤回系として扱います
+- `update-to[].source` には `publisher` や `retraction-watch` が入ることがあります
+
+## 出力
+
+通常出力は「問題があった書誌だけ」です。`--all` を付けると正常な書誌も含めたフルレポートになります。
+
+### 出力される主なセクション
+
+- `Likely Wrong Citation`
+- `未発見`
+- `撤回・撤回相当（Crossref 更新通知）`
+- `出版年注意`
+- `ウェブサイト/ソフトウェア参照（--all 時）`
+
+### 出力例
+
+```md
+# Reference Audit Report
+
+対象：貼り付けテキストのうち **問題があった書誌**（未発見／誤引用候補／撤回系）だけを列挙しています。
+
+## ⚠️ Likely Wrong Citation
+
+- 入力: `Barteit S, Kyaw BM, Muller A, et al. The Effectiveness of Digital Game-Based Learning ... JMIR Serious Games 2021; 9(3): e29080.`
+- 最有力候補: **Augmented, mixed, and virtual reality-based head-mounted devices for medical education: systematic review**
+- DOI: `10.2196/29080`
+- ⚠ 要確認 (1件):
+  - 📄 タイトル: "The Effectiveness of Digital Game-Based Learning ..." → Crossref では "Augmented, mixed, and virtual reality-based head-mounted devices for medical education: systematic review"
+- ✓ 一致 (4件): 👤 著者, 📅 出版年, 📚 掲載先, 📖 巻号・ページ
+- 注記: candidate_mismatch
+
+### 修正候補
+
+- **Augmented, mixed, and virtual reality-based head-mounted devices for medical education: systematic review**
+- DOI: `10.2196/29080`
+- 比較: title ~ / authors ok / year ok / venue ok / pages ok
+- 書誌: JMIR Serious Games / 2021
+```
+
+## Web UI / API
+
+`public/` に静的フロントエンド、`api/check.py` に Vercel Python Serverless Function を含みます。ブラウザから1件ずつ参考文献を貼り付けて確認できます。
 
 ### Web でのメールアドレスの扱い
 
-- チェック実行時に、Crossref / PubMed の etiquette 用としてメールアドレス入力が必須です。
-- メールアドレスは API リクエストごとに送信され、`User-Agent` / `email` パラメータのためにのみ使用します。
-- サーバー側で保存しません。
-- 既定ではブラウザにも保存しません。
-- `このブラウザにメールアドレスを保存` を ON にした場合のみ、ブラウザの `localStorage` に保存します。
+- チェック実行時にメールアドレス入力が必須です
+- 用途は Crossref / PubMed の etiquette 用 `User-Agent` / `email` パラメータのみです
+- サーバー側では保存しません
+- ブラウザにも既定では保存しません
+- `このブラウザにメールアドレスを保存` を有効にした場合のみ `localStorage` に保存します
+
+### API リクエスト仕様
+
+`POST /api/check`
+
+```json
+{
+  "ref": "reference text",
+  "email": "you@example.com"
+}
+```
+
+- `ref` は必須、2000文字以内
+- `email` は必須、形式チェックあり
+- 応答は `{"ok": true, "result": ...}` 形式で、`result` は `MatchResult` 相当の JSON を返します
 
 ### Vercel デプロイ
 
@@ -44,136 +200,57 @@ vercel
 vercel --prod
 ```
 
-Vercel では Framework Preset を `Other` とし、`vercel.json` をそのまま使います。Hobby（無料）プランで運用可能です（Serverless Function 実行上限 10 秒）。ローカル確認は `vercel dev` です。
+Framework Preset は `Other` を使い、`vercel.json` をそのまま利用します。ローカル確認は `vercel dev` です。
 
-## CLI
+## API 利用時の作法
 
-```bash
-# ファイルを指定して実行（結果は stdout）
-citeguard --input-file input/references.txt
+### Crossref
 
-# レポートをファイルに出力
-citeguard --input-file input/references.txt --out outputs/report.md
+- `User-Agent` に mailto 付き識別子を設定
+- レート目安は 50 req/s。既定では礼儀的に待機を入れる
+- `select=` を使って返却項目を絞る
 
-# インラインテキスト
-citeguard --text "Smith J. 2019. Some Title. J Example. DOI: 10.1234/abcd"
+### PubMed
 
-# パイプ（stdin）
-cat input/references.txt | citeguard
+- `tool` / `email` を付与
+- タイトル検索と citation matcher を候補源として使う
 
-# python -m でも実行可能
-python -m refaudit --input-file input/references.txt
-```
+### arXiv
 
-### CLI オプション一覧
-
-| オプション | 説明 |
-|---|---|
-| `--input-file PATH` | 参考文献ファイル（1行1書誌 or BibTeX） |
-| `--text TEXT` | インライン参考文献テキスト |
-| `--out PATH` | Markdown レポート出力先（省略時は stdout） |
-| `--all` | 問題のない書誌も含めた全件レポート |
-| `--debug` | 未マッチ書誌の Crossref 候補を表示 |
-| `--email EMAIL` | API 礼儀用メールアドレス（`CONTACT_EMAIL` 環境変数/.env でも可） |
-| `--version` | バージョン表示 |
-
-入力は `--text`・`--input-file`・stdin の排他です。いずれも指定しない場合は stdin から読み取ります。
-
-## 入力形式
-
-### プレーンテキスト（1行1書誌）
-- 1行＝1書誌。行頭の `[1]` や `1.` は自動で剥がします。
-- 行内に DOI が含まれていればそれを優先使用します。
-- URL のみ・ソフトウェア名のみなどウェブサイト参照は自動判別し、API 検索をスキップします。
-
-### BibTeX（`.bib` ファイル）
-- BibTeX 形式を自動検出します。特別なフラグは不要です。
-- `@article`、`@book`、`@inproceedings` 等の主要エントリタイプに対応。
-- 各エントリの `author`・`title`・`year`・`doi`・`eprint`（arXiv）フィールドを抽出してチェックします。
-
-```bash
-# .bib ファイルを直接指定
-citeguard --input-file references.bib
-
-# パイプでも可
-cat references.bib | citeguard
-```
-
-## 検索・判定フロー
-
-書誌ごとに以下のフォールバックチェーンで照合します。
-
-1. **DOI 直接解決** — 行内に DOI があれば Multi-RA 解決（Crossref → DataCite → JaLC → doi.org content negotiation）
-2. **arXiv ID 直接ルックアップ** — arXiv ID（`2307.06464` / `hep-th/9901001` 形式）があれば arXiv API
-3. **Crossref 書誌検索** — `query.bibliographic` で候補を取得し、タイトル・著者・年で照合
-4. **PubMed 検索** — タイトル文字列を推定して ESearch + ESummary で完全一致検索
-5. **JaLC タイトル検索** — 和文タイトルを JaLC `search` API で引き、返った DOI を既存の DOI 解決チェーンで照合
-6. **arXiv タイトル/著者検索** — 上記で未ヒットの場合、arXiv ATOM API で検索
-
-### 撤回判定
-
-- 候補 DOI に対して Crossref `filter=updates:{DOI},is-update:true` で更新レコードを取得。
-- `update-to[].type` が `retraction` / `withdrawal` / `removal` / `partial_retraction` のいずれかなら撤回系と判定。
-- Retraction Watch 統合により `update-to[].source` に `retraction-watch` が入る場合があります。
-
-## API の作法
-
-### Crossref REST API
-- `User-Agent` に mailto 付き識別子を設定（例: `citeguard/0.1 (mailto:you@example.com)`）。
-- レートの目安は 50 req/s（public/polite）。本ツールは 0.2 秒スリープを挿入。
-- `select=` で返却項目を絞り軽量化。
-
-### PubMed E-utilities API
-- `tool` / `email` パラメータを付与（NCBI エチケット要件）。
-- ESearch → ESummary/EFetch の 2 段階で PMID・DOI・タイトルを取得。
-- 0.2 秒ポーズ（NCBI 推奨: 3 req/s）。
-
-### arXiv ATOM API
-- `export.arxiv.org/api/query` を使用。
-- ID 直接ルックアップが最も信頼性が高い。タイトル/著者検索もサポート。
-- レート制限: 3 秒に 1 リクエスト推奨。
+- `export.arxiv.org/api/query` を使う
+- 直接ID照合を優先し、必要に応じてタイトル/著者検索も行う
 
 ### Multi-RA DOI 解決
-- `doira.org` で DOI の登録機関（RA）を判定。
-- RA に応じて Crossref API / DataCite API / JaLC API を使い分け。
-- いずれでも解決できない場合は `doi.org` の content negotiation（CSL-JSON）でフォールバック。
+
+- `doira.org` で Registration Agency を判定
+- Crossref / DataCite / JaLC / doi.org content negotiation を切り替える
 
 ## GitHub Actions
 
-### 参照チェック（`run-pipeline.yml`）
-1. リポジトリの Secrets に `CONTACT_EMAIL` を設定。
-2. `input/references.txt` をコミット（または push）するとワークフローが走り、`outputs/report.md` を生成・コミット。
-3. 手動実行（workflow_dispatch）も可能（`path` パラメータでファイル指定）。
+### `ci.yml`
 
-### PyPI 公開（`publish.yml`）
-- `v*` タグの push で起動。
-- Build → テストインストール → TestPyPI → PyPI の順に実行（Trusted Publisher）。
+- `ruff check .`
+- テスト実行
 
-## 出力例
+### `run-pipeline.yml`
 
-```md
-# Reference Audit Report
+1. Secrets に `CONTACT_EMAIL` を設定
+2. `input/references.txt` を更新して push するか、手動実行する
+3. `outputs/report.md` を生成してコミットする
 
-対象：貼り付けテキストのうち **問題があった書誌**（未発見／撤回系）だけを列挙しています。
+### `publish.yml`
 
-## 未発見
-- 入力: `Smith J., Doe A. 2019. Title of paper... Journal...`
-- 理由: Crossref REST `/works?query.bibliographic=` で候補なし
+- `v*` タグ push で配布フローを実行
 
-## 撤回・撤回相当（Crossref 更新通知）
-- 入力: `Doe A. 2011. Another title... Journal... DOI: 10.1234/abcd.5678`
-- マッチ: **Another title...**
-- DOI: `10.1234/abcd.5678`
+## 開発
 
-### 参照された更新（通知）
-- 種別: **retraction**, 通知DOI: `10.9999/notice.2020.1`, source: `retraction-watch`, date: `2020-05-01T00:00:00Z`
+```bash
+pip install -e ".[dev]"
+pytest
+ruff check .
 ```
 
-## 発展アイデア
-
-- タイトル類似度や年差でのスコア閾値を追加して厳密化。
-- 出力拡張（Retraction Watch 詳細の突き合わせ）。
-- レート管理（`rows`・`select`・カーソル利用）。
+誤引用検出まわりの回帰テストは `tests/test_miscitation_detection.py` にあります。
 
 ## 資金源
 

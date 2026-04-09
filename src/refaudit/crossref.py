@@ -174,19 +174,25 @@ class CrossrefClient:
             return False, []
         notices = self.find_updates_for(doi)
         hits: list[dict] = []
+        seen: set[tuple[str | None, str | None]] = set()
         for notice in notices:
             for update in notice.get("update-to", []):
                 update_type = (update.get("type") or "").lower()
-                if update_type in RETRACTION_TYPES:
-                    hits.append(
-                        {
-                            "notice_doi": notice.get("DOI"),
-                            "update_type": update.get("type"),
-                            "source": update.get("source"),
-                            "updated": update.get("updated", {}),
-                            "label": update.get("label"),
-                        }
-                    )
+                if update_type not in RETRACTION_TYPES:
+                    continue
+                key = (notice.get("DOI"), update_type)
+                if key in seen:
+                    continue
+                seen.add(key)
+                hits.append(
+                    {
+                        "notice_doi": notice.get("DOI"),
+                        "update_type": update.get("type"),
+                        "source": update.get("source"),
+                        "updated": update.get("updated", {}),
+                        "label": update.get("label"),
+                    }
+                )
         return bool(hits), hits
 
     def _doi_metadata_to_work(self, doi_meta) -> dict:

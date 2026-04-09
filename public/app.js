@@ -210,6 +210,9 @@ function classify(result) {
   if (result.error) {
     return { kind: "error", label: "エラー" };
   }
+  if (result.retracted) {
+    return { kind: "retracted", label: "🚩 撤回" };
+  }
   if (result.status === "likely_wrong") {
     return { kind: "likely-wrong", label: "誤引用候補" };
   }
@@ -227,9 +230,6 @@ function classify(result) {
   }
   if (!result.found) {
     return { kind: "not-found", label: "未発見" };
-  }
-  if (result.retracted) {
-    return { kind: "retracted", label: "撤回" };
   }
   if (result.note === "year_warning") {
     return { kind: "year-warning", label: "年注意" };

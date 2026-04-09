@@ -191,10 +191,22 @@ button:disabled {
 .result-card.ok { border-left-color: var(--ok); }
 .result-card.likely-wrong { border-left-color: var(--warn); }
 .result-card.not-found { border-left-color: var(--bad); }
-.result-card.retracted { border-left-color: var(--bad); }
+.result-card.retracted {
+  border-left-color: #8a0303;
+  border-left-width: 12px;
+  background: rgba(177, 68, 47, 0.08);
+  box-shadow: 0 0 0 2px rgba(138, 3, 3, 0.25);
+}
 .result-card.website { border-left-color: var(--soft); }
 .result-card.year-warning { border-left-color: var(--warn); }
 .result-card.error { border-left-color: var(--bad); }
+
+.result-card.retracted .badge {
+  background: #8a0303;
+  color: #fff;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
 
 .result-card-header {
   display: flex;
