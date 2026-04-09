@@ -125,6 +125,7 @@ citeguard --input-file references.bib
 - DOI が得られた場合、Crossref `filter=updates:{DOI},is-update:true` で更新通知を取得します
 - `update-to[].type` が `retraction` / `withdrawal` / `removal` / `partial_retraction` なら撤回系として扱います
 - `update-to[].source` には `publisher` や `retraction-watch` が入ることがあります
+- レポートでは `種別`、`通知DOI`、`source`、`date` を通知ごとに表示します
 
 ## 出力
 
@@ -161,7 +162,19 @@ citeguard --input-file references.bib
 - DOI: `10.2196/29080`
 - 比較: title ~ / authors ok / year ok / venue ok / pages ok
 - 書誌: JMIR Serious Games / 2021
+
+## 🚩 撤回・撤回相当（Crossref 更新通知）
+
+- 入力: `Doe A. 2011. Another title... Journal... DOI: 10.1234/abcd.5678`
+- マッチ: **Another title...**
+- DOI: `10.1234/abcd.5678`
+
+### 参照された更新（通知）
+
+- 種別: **retraction**, 通知DOI: `10.9999/notice.2020.1`, source: `retraction-watch`, date: `2020-05-01T00:00:00Z`
 ```
+
+撤回系の表示では、入力書誌だけでなく、マッチした論文タイトルと DOI を出したうえで、Crossref の更新通知を一覧表示します。
 
 ## Web UI / API
 
