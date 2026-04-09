@@ -8,7 +8,9 @@
       "Bash(netstat -ano)",
       "Bash(taskkill //F //PID 32812)",
       "Bash(kill 1877 1858)",
-      "Bash(python scripts/local_server.py)"
+      "Bash(python scripts/local_server.py)",
+      "Bash(python -m pytest tests/test_miscitation_detection.py -x -q)",
+      "Bash(python -m pytest -x -q)"
     ]
   }
 }

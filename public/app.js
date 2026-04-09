@@ -12,6 +12,62 @@ const template = document.getElementById("result-template");
 
 let latestResults = [];
 
+const FIELD_LABEL = {
+  title: "📄 タイトル",
+  authors: "👤 著者",
+  year: "📅 出版年",
+  venue: "📚 掲載先",
+  pages: "📖 巻号・ページ",
+};
+const FIELD_ORDER = ["title", "authors", "year", "venue", "pages"];
+const ATTENTION_STATES = new Set([
+  "mismatch",
+  "abbrev",
+  "near",
+  "missing_input",
+  "missing_candidate",
+]);
+
+function renderFieldDiffs(diffs) {
+  if (!diffs) return [];
+  const needs = [];
+  const oks = [];
+  for (const key of FIELD_ORDER) {
+    const d = diffs[key];
+    if (!d) continue;
+    if (d.state === "ok") {
+      oks.push(FIELD_LABEL[key]);
+    } else if (ATTENTION_STATES.has(d.state)) {
+      needs.push([key, d]);
+    }
+  }
+  const lines = [];
+  if (needs.length) {
+    lines.push(`⚠ 要確認 (${needs.length}件):`);
+    for (const [key, d] of needs) {
+      const label = FIELD_LABEL[key];
+      const iv = d.input_value || "(なし)";
+      const cv = d.candidate_value || "(取得不可)";
+      if (d.state === "missing_input" || d.state === "missing_candidate") {
+        lines.push(`  • ${label}: 入力=${iv} / Crossref=${cv}`);
+      } else {
+        lines.push(`  • ${label}: "${iv}" → Crossref では "${cv}"`);
+      }
+      if (d.reason) lines.push(`      （${d.reason}）`);
+    }
+  }
+  if (oks.length) {
+    lines.push(`✓ 一致 (${oks.length}件): ${oks.join(", ")}`);
+  }
+  return lines;
+}
+
+function pickFieldDiffs(result) {
+  if (result?.field_diffs) return result.field_diffs;
+  if (result?.best_candidate?.field_diffs) return result.best_candidate.field_diffs;
+  return null;
+}
+
 /* ---------- BibTeX detection & parsing ---------- */
 
 const BIBTEX_ENTRY_RE =
@@ -206,7 +262,12 @@ function renderResults(results) {
     if (result.doi) rows.push(`DOI: ${result.doi}`);
     if (result.method) rows.push(`判定経路: ${result.method}`);
     if (result.note && result.note !== "website_reference") rows.push(`注記: ${result.note}`);
-    if (result.comparison_summary) rows.push(`比較: ${result.comparison_summary}`);
+    const diffLines = renderFieldDiffs(pickFieldDiffs(result));
+    if (diffLines.length) {
+      rows.push(...diffLines);
+    } else if (result.comparison_summary) {
+      rows.push(`比較: ${result.comparison_summary}`);
+    }
     if (result.arxiv_id) rows.push(`arXiv ID: ${result.arxiv_id}`);
     if (result.arxiv_doi) rows.push(`出版版DOI: ${result.arxiv_doi}`);
     if (result.journal_ref) rows.push(`Journal ref: ${result.journal_ref}`);
@@ -325,7 +386,12 @@ function buildMarkdown(results, inputText) {
       lines.push("### ⚠️ Likely Wrong Citation", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.title) lines.push(`- 最有力候補: **${result.title}**`);
       if (result.doi) lines.push(`- DOI: \`${result.doi}\``);
-      if (result.comparison_summary) lines.push(`- 比較: ${result.comparison_summary}`);
+      const mdDiffLines = renderFieldDiffs(pickFieldDiffs(result));
+      if (mdDiffLines.length) {
+        for (const line of mdDiffLines) lines.push(`- ${line}`);
+      } else if (result.comparison_summary) {
+        lines.push(`- 比較: ${result.comparison_summary}`);
+      }
       if (Array.isArray(result.candidates) && result.candidates.length) {
         lines.push("", "#### 修正候補", "");
         for (const candidate of result.candidates) {

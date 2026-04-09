@@ -32,6 +32,33 @@ def _work(
     }
 
 
+def test_field_diffs_classify_venue_abbrev_year_near_and_missing_pages():
+    reference = ReferenceRecord(
+        title="Norepinephrine vs phenylephrine for spinal hypotension",
+        authors=["imai", "kataoka"],
+        year=2024,
+        venue="J Anesth",
+    )
+    candidate = ReferenceRecord(
+        title="Norepinephrine vs phenylephrine for spinal hypotension",
+        authors=["imai", "kataoka"],
+        year=2025,
+        venue="Journal of Anesthesia",
+        volume="39",
+        page="100-110",
+    )
+    diffs = score_candidate(reference, candidate, mode="verification").field_diffs
+
+    assert diffs["title"]["state"] == "ok"
+    assert diffs["authors"]["state"] == "ok"
+    assert diffs["year"]["state"] == "near"
+    assert diffs["year"]["reason"] and "1年" in diffs["year"]["reason"]
+    assert diffs["venue"]["state"] == "abbrev"
+    assert "略記" in (diffs["venue"]["reason"] or "")
+    assert diffs["pages"]["state"] == "missing_input"
+    assert diffs["pages"]["reason"] == "入力に記載なし"
+
+
 def test_extract_authors_handles_and_and_japanese_separator():
     assert extract_authors("Rudolph JW, Simon R, Raemer DB and Eppich WJ. Debriefing ...") == [
         "rudolph",
@@ -260,6 +287,12 @@ def test_crossref_client_flags_miscitations_with_suggestions(monkeypatch):
 
     result = client.check_one(references["1"])
     assert result.comparison_summary == "title ~ / authors ok / year ok / venue ok / pages ok"
+    assert result.field_diffs is not None
+    assert result.field_diffs["title"]["state"] in {"near", "mismatch", "abbrev"}
+    assert result.field_diffs["authors"]["state"] == "ok"
+    assert result.field_diffs["year"]["state"] == "ok"
+    assert result.field_diffs["venue"]["state"] == "ok"
+    assert result.field_diffs["pages"]["state"] == "ok"
     assert result.candidates
     assert result.candidates[0]["doi"] == "10.2196/29080"
 
@@ -415,6 +448,31 @@ def test_report_renders_likely_wrong_section():
         status="likely_wrong",
         note="candidate_mismatch",
         comparison_summary="title x / authors ~ / year ok / venue ok / pages ok",
+        field_diffs={
+            "title": {
+                "state": "mismatch",
+                "input_value": "Wrong title",
+                "candidate_value": "Augmented, mixed, and virtual reality-based head-mounted devices",
+                "reason": None,
+                "score": 0.1,
+            },
+            "authors": {
+                "state": "near",
+                "input_value": "Barteit",
+                "candidate_value": "Barteit, Lanfermann",
+                "reason": None,
+                "score": 0.5,
+            },
+            "year": {"state": "ok", "input_value": "2021", "candidate_value": "2021", "reason": None, "score": 1.0},
+            "venue": {
+                "state": "ok",
+                "input_value": "JMIR Serious Games",
+                "candidate_value": "JMIR Serious Games",
+                "reason": None,
+                "score": 1.0,
+            },
+            "pages": {"state": "ok", "input_value": "9(3): e29080", "candidate_value": "9(3): e29080", "reason": None, "score": 1.0},
+        },
         candidates=[
             {
                 "title": "Augmented, mixed, and virtual reality-based head-mounted devices for medical education: systematic review",
@@ -428,7 +486,10 @@ def test_report_renders_likely_wrong_section():
 
     markdown = make_markdown_bad_only([result])
     assert "Likely Wrong Citation" in markdown
-    assert "title x / authors ~ / year ok / venue ok / pages ok" in markdown
+    assert "⚠ 要確認" in markdown
+    assert "📄 タイトル" in markdown
+    assert "✓ 一致" in markdown
+    assert "📚 掲載先" in markdown
     assert "10.2196/29080" in markdown
 
 
@@ -443,6 +504,13 @@ def test_cli_markdown_includes_likely_wrong_section(tmp_path, monkeypatch):
         status="likely_wrong",
         note="candidate_mismatch",
         comparison_summary="title x / authors ok / year ok / venue ok / pages ok",
+        field_diffs={
+            "title": {"state": "mismatch", "input_value": "Wrong", "candidate_value": "Suggested title", "reason": None, "score": 0.1},
+            "authors": {"state": "ok", "input_value": "A", "candidate_value": "A", "reason": None, "score": 1.0},
+            "year": {"state": "ok", "input_value": "2020", "candidate_value": "2020", "reason": None, "score": 1.0},
+            "venue": {"state": "ok", "input_value": "X", "candidate_value": "X", "reason": None, "score": 1.0},
+            "pages": {"state": "ok", "input_value": "1", "candidate_value": "1", "reason": None, "score": 1.0},
+        },
         candidates=[{"title": "Suggested title", "doi": "10.2196/29080", "field_summary": "title x / authors ok / year ok / venue ok / pages ok"}],
     )
 
@@ -459,4 +527,5 @@ def test_cli_markdown_includes_likely_wrong_section(tmp_path, monkeypatch):
     run("Wrong citation", out_path)
     text = out_path.read_text(encoding="utf-8")
     assert "Likely Wrong Citation" in text
-    assert "title x / authors ok / year ok / venue ok / pages ok" in text
+    assert "⚠ 要確認" in text
+    assert "📄 タイトル" in text

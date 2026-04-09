@@ -5,8 +5,56 @@ from typing import Iterable
 from .crossref import MatchResult
 
 
-def _field_summary(result: MatchResult) -> str | None:
-    return result.comparison_summary or (result.best_candidate and result.best_candidate.get("field_summary"))
+FIELD_LABEL = {
+    "title": "📄 タイトル",
+    "authors": "👤 著者",
+    "year": "📅 出版年",
+    "venue": "📚 掲載先",
+    "pages": "📖 巻号・ページ",
+}
+FIELD_ORDER = ("title", "authors", "year", "venue", "pages")
+ATTENTION_STATES = {"mismatch", "abbrev", "near", "missing_input", "missing_candidate"}
+
+
+def _field_diffs(result: MatchResult) -> dict[str, dict] | None:
+    if result.field_diffs:
+        return result.field_diffs
+    if result.best_candidate:
+        return result.best_candidate.get("field_diffs")
+    return None
+
+
+def _render_field_diffs(diffs: dict[str, dict] | None) -> list[str]:
+    if not diffs:
+        return []
+    needs: list[tuple[str, dict]] = []
+    oks: list[str] = []
+    for key in FIELD_ORDER:
+        d = diffs.get(key)
+        if not d:
+            continue
+        state = d.get("state")
+        if state == "ok":
+            oks.append(FIELD_LABEL[key])
+        elif state in ATTENTION_STATES:
+            needs.append((key, d))
+    lines: list[str] = []
+    if needs:
+        lines.append(f"- ⚠ 要確認 ({len(needs)}件):")
+        for key, d in needs:
+            label = FIELD_LABEL[key]
+            iv = d.get("input_value") or "(なし)"
+            cv = d.get("candidate_value") or "(取得不可)"
+            state = d.get("state")
+            if state in {"missing_input", "missing_candidate"}:
+                lines.append(f"  - {label}: 入力={iv} / Crossref={cv}")
+            else:
+                lines.append(f'  - {label}: "{iv}" → Crossref では "{cv}"')
+            if d.get("reason"):
+                lines.append(f"    （{d['reason']}）")
+    if oks:
+        lines.append(f"- ✓ 一致 ({len(oks)}件): {', '.join(oks)}")
+    return lines
 
 
 def _candidate_lines(result: MatchResult) -> list[str]:
@@ -36,7 +84,11 @@ def _section_year_warning(result: MatchResult) -> list[str]:
         lines.append(f"- マッチ: **{result.title}**")
     if result.doi:
         lines.append(f"- DOI: `{result.doi}`")
-    lines.append("- 注: タイトル・著者は一致していますが、出版年が参照と異なる可能性があります。")
+    diff_lines = _render_field_diffs(_field_diffs(result))
+    if diff_lines:
+        lines.extend(diff_lines)
+    else:
+        lines.append("- 注: タイトル・著者は一致していますが、出版年が参照と異なる可能性があります。")
     lines.append("")
     return lines
 
@@ -69,8 +121,7 @@ def _section_likely_wrong(result: MatchResult) -> list[str]:
         lines.append(f"- 最有力候補: **{result.title}**")
     if result.doi:
         lines.append(f"- DOI: `{result.doi}`")
-    if _field_summary(result):
-        lines.append(f"- 比較: {_field_summary(result)}")
+    lines.extend(_render_field_diffs(_field_diffs(result)))
     if result.note:
         lines.append(f"- 注記: {result.note}")
     lines.append("")
@@ -184,8 +235,8 @@ def make_markdown_full(results: Iterable[MatchResult]) -> str:
             ]
             if result.doi:
                 lines.append(f"- DOI: `{result.doi}`")
-            if _field_summary(result):
-                lines.append(f"- 比較: {_field_summary(result)}")
+            if result.comparison_summary:
+                lines.append(f"- 比較: {result.comparison_summary}")
             lines.append("")
 
     if websites:

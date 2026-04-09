@@ -40,6 +40,7 @@ class CandidateScore:
     signals: dict[str, float]
     field_states: dict[str, str]
     summary: str
+    field_diffs: dict[str, dict] = field(default_factory=dict)
     note: str | None = None
 
 
@@ -204,6 +205,163 @@ def _build_summary(field_states: dict[str, str]) -> str:
     return " / ".join(f"{key} {field_states.get(key, '?')}" for key in keys)
 
 
+def _format_authors_display(authors: list[str]) -> str | None:
+    if not authors:
+        return None
+    head = ", ".join(authors[:3])
+    if len(authors) > 3:
+        head += ", et al."
+    return head
+
+
+def _format_pages_display(record: ReferenceRecord) -> str | None:
+    parts: list[str] = []
+    if record.volume:
+        if record.issue:
+            parts.append(f"{record.volume}({record.issue})")
+        else:
+            parts.append(str(record.volume))
+    elif record.issue:
+        parts.append(f"({record.issue})")
+    page = record.page or record.article_number
+    if page:
+        if parts:
+            parts.append(f": {page}")
+        else:
+            parts.append(str(page))
+    if not parts:
+        return None
+    return "".join(parts)
+
+
+def _looks_like_abbrev(short: str | None, long: str | None) -> bool:
+    """簡易判定: 短い側のトークンが順序を保って長い側トークンの prefix になっている"""
+    if not short or not long:
+        return False
+    short_tokens = [tok for tok in normalize_text(short).split() if tok]
+    long_tokens = [tok for tok in normalize_text(long).split() if tok]
+    if not short_tokens or not long_tokens or len(short_tokens) > len(long_tokens):
+        return False
+    j = 0
+    for tok in short_tokens:
+        while j < len(long_tokens) and not long_tokens[j].startswith(tok):
+            j += 1
+        if j >= len(long_tokens):
+            return False
+        j += 1
+    return True
+
+
+def _classify_field(
+    name: str,
+    score: float,
+    input_value: str | None,
+    candidate_value: str | None,
+    *,
+    has_input: bool,
+    has_candidate: bool,
+    input_year: int | None = None,
+    candidate_year: int | None = None,
+) -> tuple[str, str | None]:
+    if not has_input and not has_candidate:
+        return "missing_both", None
+    if not has_input:
+        return "missing_input", "入力に記載なし"
+    if not has_candidate:
+        return "missing_candidate", "Crossref から取得できず"
+    if score >= 0.7:
+        if name == "year" and input_year is not None and candidate_year is not None and input_year != candidate_year:
+            return "near", "1年ずれ（オンライン公開／印刷年の差の可能性）"
+        return "ok", None
+    if name == "venue":
+        if _looks_like_abbrev(input_value, candidate_value) or _looks_like_abbrev(candidate_value, input_value):
+            return "abbrev", "略記の可能性。許容するか確認"
+    if score >= 0.35:
+        return "near", None
+    return "mismatch", None
+
+
+def _build_field_diffs(
+    reference: ReferenceRecord,
+    candidate: ReferenceRecord,
+    signals: dict[str, float],
+) -> dict[str, dict]:
+    title_score = signals["title_similarity"]
+    author_score = max(signals["author_overlap"], signals["first_author_match"])
+    year_score = signals["year_similarity"]
+    venue_score = signals["venue_similarity"]
+    pages_score = max(signals["volume_issue_similarity"], signals["page_similarity"])
+
+    ref_pages_display = _format_pages_display(reference)
+    cand_pages_display = _format_pages_display(candidate)
+    has_ref_pages = bool(reference.page or reference.article_number or reference.volume or reference.issue)
+    has_cand_pages = bool(candidate.page or candidate.article_number or candidate.volume or candidate.issue)
+
+    fields = [
+        (
+            "title",
+            title_score,
+            reference.title,
+            candidate.title,
+            bool(reference.title),
+            bool(candidate.title),
+        ),
+        (
+            "authors",
+            author_score,
+            _format_authors_display(reference.authors),
+            _format_authors_display(candidate.authors),
+            bool(reference.authors),
+            bool(candidate.authors),
+        ),
+        (
+            "year",
+            year_score,
+            str(reference.year) if reference.year is not None else None,
+            str(candidate.year) if candidate.year is not None else None,
+            reference.year is not None,
+            candidate.year is not None,
+        ),
+        (
+            "venue",
+            venue_score,
+            reference.venue,
+            candidate.venue,
+            bool(reference.venue),
+            bool(candidate.venue),
+        ),
+        (
+            "pages",
+            pages_score,
+            ref_pages_display,
+            cand_pages_display,
+            has_ref_pages,
+            has_cand_pages,
+        ),
+    ]
+
+    diffs: dict[str, dict] = {}
+    for name, score_value, in_val, cand_val, has_in, has_cand in fields:
+        state, reason = _classify_field(
+            name,
+            score_value,
+            in_val,
+            cand_val,
+            has_input=has_in,
+            has_candidate=has_cand,
+            input_year=reference.year if name == "year" else None,
+            candidate_year=candidate.year if name == "year" else None,
+        )
+        diffs[name] = {
+            "state": state,
+            "input_value": in_val,
+            "candidate_value": cand_val,
+            "reason": reason,
+            "score": round(score_value, 3),
+        }
+    return diffs
+
+
 def score_candidate(
     reference: ReferenceRecord,
     candidate: ReferenceRecord,
@@ -311,5 +469,6 @@ def score_candidate(
         signals=signals,
         field_states=field_states,
         summary=_build_summary(field_states),
+        field_diffs=_build_field_diffs(reference, candidate, signals),
         note=note,
     )

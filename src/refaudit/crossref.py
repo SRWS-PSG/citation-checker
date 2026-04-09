@@ -55,6 +55,7 @@ class MatchResult:
     best_candidate: dict | None = None
     comparison_summary: str | None = None
     field_signals: dict[str, str] | None = None
+    field_diffs: dict[str, dict] | None = None
 
 
 @dataclass
@@ -306,6 +307,7 @@ class CrossrefClient:
             "decision": candidate.score.decision,
             "field_summary": candidate.score.summary,
             "field_states": candidate.score.field_states,
+            "field_diffs": candidate.score.field_diffs,
             "signals": candidate.score.signals,
             "year": record.year,
             "container": record.venue,
@@ -355,6 +357,7 @@ class CrossrefClient:
             best_candidate=self._candidate_payload(candidate),
             comparison_summary=candidate.score.summary,
             field_signals=candidate.score.field_states,
+            field_diffs=candidate.score.field_diffs,
         )
 
     def _sort_candidates(self, candidates: list[CandidateMatch]) -> list[CandidateMatch]:
