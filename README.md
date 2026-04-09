@@ -1,6 +1,6 @@
 # citeguard
 
-学術参考文献を Crossref・PubMed・arXiv の 3 つの API で照合し、**存在しない引用**や**撤回（Retraction / Withdrawal / Removal）された論文**を検出するツールです。CLI に加えて、Vercel へ配置できる Web UI も含みます。DOI が Crossref 以外の登録機関（DataCite・JaLC 等）に属する場合も自動でフォールバック解決します。
+学術参考文献を Crossref・PubMed・arXiv・JaLC の API で照合し、**存在しない引用**や**撤回（Retraction / Withdrawal / Removal）された論文**を検出するツールです。CLI に加えて、Vercel へ配置できる Web UI も含みます。DOI が Crossref 以外の登録機関（DataCite・JaLC 等）に属する場合も自動でフォールバック解決します。
 
 ```bash
 pip install citeguard
@@ -107,7 +107,8 @@ cat references.bib | citeguard
 2. **arXiv ID 直接ルックアップ** — arXiv ID（`2307.06464` / `hep-th/9901001` 形式）があれば arXiv API
 3. **Crossref 書誌検索** — `query.bibliographic` で候補を取得し、タイトル・著者・年で照合
 4. **PubMed 検索** — タイトル文字列を推定して ESearch + ESummary で完全一致検索
-5. **arXiv タイトル/著者検索** — 上記で未ヒットの場合、arXiv ATOM API で検索
+5. **JaLC タイトル検索** — 和文タイトルを JaLC `search` API で引き、返った DOI を既存の DOI 解決チェーンで照合
+6. **arXiv タイトル/著者検索** — 上記で未ヒットの場合、arXiv ATOM API で検索
 
 ### 撤回判定
 

@@ -268,18 +268,51 @@ function escapeInlineCode(value) {
   return String(value || "").replace(/`/g, "\\`");
 }
 
-function buildMarkdown(results) {
+function buildMarkdown(results, inputText) {
+  const counts = {
+    ok: 0,
+    "not-found": 0,
+    "likely-wrong": 0,
+    retracted: 0,
+    website: 0,
+    "year-warning": 0,
+    error: 0,
+  };
+  for (const result of results) {
+    counts[classify(result).kind] += 1;
+  }
+
+  const lines = ["# Reference Audit Report", ""];
+
+  // ## 入力
+  lines.push("## 入力", "", "```", String(inputText || "").replace(/```/g, "``\u200b`"), "```", "");
+
+  // ## チェック結果
+  lines.push("## チェック結果", "");
+  lines.push(
+    `- 正常: ${counts.ok}`,
+    `- 誤引用候補: ${counts["likely-wrong"]}`,
+    `- 未発見: ${counts["not-found"]}`,
+    `- 撤回: ${counts.retracted}`,
+    `- 年注意: ${counts["year-warning"]}`,
+    `- ウェブサイト: ${counts.website}`,
+    `- エラー: ${counts.error}`,
+    ""
+  );
+  results.forEach((result, i) => {
+    const { label } = classify(result);
+    const title = result.title ? ` — ${result.title}` : "";
+    const doi = result.doi ? ` (DOI: ${result.doi})` : "";
+    lines.push(`${i + 1}. **[${label}]** \`${escapeInlineCode(result.input_text)}\`${title}${doi}`);
+  });
+  lines.push("");
+
+  // ## 注意すべき候補
+  lines.push("## 注意すべき候補", "");
   const bad = results.filter((result) => {
     const state = classify(result).kind;
     return ["likely-wrong", "not-found", "retracted", "year-warning", "error"].includes(state);
   });
-
-  const lines = [
-    "# Reference Audit Report",
-    "",
-    "対象：貼り付けテキストのうち **問題があった書誌**（未発見／誤引用候補／撤回系）だけを列挙しています。",
-    "",
-  ];
 
   if (!bad.length) {
     lines.push("_問題のある書誌は見つかりませんでした。_");
@@ -289,12 +322,12 @@ function buildMarkdown(results) {
   for (const result of bad) {
     const state = classify(result).kind;
     if (state === "likely-wrong") {
-      lines.push("## ⚠️ Likely Wrong Citation", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
+      lines.push("### ⚠️ Likely Wrong Citation", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.title) lines.push(`- 最有力候補: **${result.title}**`);
       if (result.doi) lines.push(`- DOI: \`${result.doi}\``);
       if (result.comparison_summary) lines.push(`- 比較: ${result.comparison_summary}`);
       if (Array.isArray(result.candidates) && result.candidates.length) {
-        lines.push("", "### 修正候補", "");
+        lines.push("", "#### 修正候補", "");
         for (const candidate of result.candidates) {
           lines.push(`- **${candidate.title || "候補"}**`);
           if (candidate.doi) lines.push(`- DOI: \`${candidate.doi}\``);
@@ -308,7 +341,7 @@ function buildMarkdown(results) {
     }
 
     if (state === "year-warning") {
-      lines.push("## △ 出版年注意", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
+      lines.push("### △ 出版年注意", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.title) lines.push(`- マッチ: **${result.title}**`);
       if (result.doi) lines.push(`- DOI: \`${result.doi}\``);
       lines.push("- 注: タイトル・著者は一致していますが、出版年が参照と異なる可能性があります。", "");
@@ -316,7 +349,7 @@ function buildMarkdown(results) {
     }
 
     if (state === "not-found" || state === "error") {
-      lines.push("## ❌ 未発見", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
+      lines.push("### ❌ 未発見", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.error) {
         lines.push(`- 理由: ${result.message || "APIエラー"}`, "");
       } else {
@@ -326,13 +359,13 @@ function buildMarkdown(results) {
     }
 
     lines.push(
-      "## 🚩 撤回・撤回相当（Crossref 更新通知）",
+      "### 🚩 撤回・撤回相当（Crossref 更新通知）",
       "",
       `- 入力: \`${escapeInlineCode(result.input_text)}\``,
       `- マッチ: **${result.title || "(no title)"}**`,
       `- DOI: \`${result.doi || "N/A"}\``,
       "",
-      "### 参照された更新（通知）",
+      "#### 参照された更新（通知）",
       ""
     );
 
@@ -424,7 +457,7 @@ async function runAudit() {
 }
 
 function downloadMarkdown() {
-  const markdown = buildMarkdown(latestResults);
+  const markdown = buildMarkdown(latestResults, referencesInput.value);
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");

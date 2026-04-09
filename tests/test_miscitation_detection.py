@@ -54,6 +54,16 @@ def test_parse_reference_metadata_extracts_core_fields():
     assert record.article_number == "e29080"
 
 
+def test_parse_reference_metadata_normalizes_japanese_spacing():
+    record = parse_reference_metadata(
+        "松村千佳子・矢野義孝．患者との医療コミュニ ケーションの重要性とその客観的評価研究．医 学教育 2020；51(3)：123-30．"
+    )
+
+    assert record.title == "患者との医療コミュニケーションの重要性とその客観的評価研究"
+    assert record.venue == "医学教育"
+    assert record.page == "123-30"
+
+
 def test_scorer_accepts_exact_match_and_suggests_miscitation():
     good_input = ReferenceRecord(
         title="Virtual Reality for Medical Training: Systematic Review and Meta-Analysis",
@@ -343,6 +353,55 @@ def test_pubmed_candidates_do_not_resolve_every_doi(monkeypatch):
     result = CrossrefClient(pause_sec=0).check_one(input_ref)
     assert result.status == "found"
     assert calls == ["10.2196/12959"]
+
+
+def test_jalc_title_fallback_flags_japanese_miscitation(monkeypatch):
+    input_ref = (
+        "松村千佳子・矢野義孝．患者との医療コミュニ ケーションの重要性とその客観的評価研究．"
+        "医 学教育 2020；51(3)：123-30．"
+    )
+
+    monkeypatch.setattr(CrossrefClient, "search_bibliographic_items", lambda self, ref, rows=5: [])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_full_citation", lambda self, citation, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_title_exact", lambda self, title, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.ArxivClient.verify_reference", lambda self, **kwargs: (None, "arxiv-no-query"))
+    monkeypatch.setattr(
+        "refaudit.crossref.JALCClient.search_title",
+        lambda self, title, rows=5: [
+            {
+                "doi": "10.34445/00000224",
+                "title": "患者との医療コミュニケーションの重要性とその客観的評価研究",
+                "ra": "JaLC",
+            }
+        ],
+    )
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+    monkeypatch.setattr(
+        CrossrefClient,
+        "_resolve_doi_work",
+        lambda self, doi: (
+            _work(
+                doi,
+                "患者との医療コミュニケーションの重要性とその客観的評価研究",
+                ["松村", "矢野"],
+                2020,
+                "京都薬科大学紀要",
+                "1",
+                "2",
+                "113-118",
+            ),
+            "doi-jalc",
+        ),
+    )
+
+    result = CrossrefClient(pause_sec=0).check_one(input_ref)
+
+    assert result.status == "likely_wrong"
+    assert result.method == "jalc-title+doi-jalc"
+    assert result.doi == "10.34445/00000224"
+    assert result.comparison_summary == "title ok / authors ok / year ok / venue x / pages x"
+    assert result.candidates
+    assert result.candidates[0]["doi"] == "10.34445/00000224"
 
 
 def test_report_renders_likely_wrong_section():

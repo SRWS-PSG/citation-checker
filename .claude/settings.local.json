@@ -6,7 +6,9 @@
       "Bash(PYTHONIOENCODING=utf-8 citeguard --input-file input/test_sample.bib --all)",
       "Bash(curl -s -X POST http://localhost:3000/api/check -H \"Content-Type: application/json\" -d \"{\\\\\"ref\\\\\":\\\\\"Tan HS, Habib AS. The optimum management of nausea and vomiting during and after cesarean delivery. Best Pract Res Clin Anaesthesiol. 2020;34\\(4\\):735-47.\\\\\",\\\\\"email\\\\\":\\\\\"test@example.com\\\\\"}\")",
       "Bash(netstat -ano)",
-      "Bash(taskkill //F //PID 32812)"
+      "Bash(taskkill //F //PID 32812)",
+      "Bash(kill 1877 1858)",
+      "Bash(python scripts/local_server.py)"
     ]
   }
 }

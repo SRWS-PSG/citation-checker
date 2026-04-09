@@ -10,8 +10,10 @@ import requests
 
 from .arxiv import ArxivClient, ArxivMatch
 from .doi_resolver import DOIResolver
+from .jalc import JALCClient
 from .etiquette import build_user_agent
 from .parser import (
+    contains_japanese_text,
     extract_arxiv_id,
     extract_doi,
     extract_title_candidate,
@@ -452,6 +454,34 @@ class CrossrefClient:
                 collected.append((self._work_to_record(item, source="arxiv-crossref"), "arxiv-crossref"))
         return collected, match.arxiv_id, match.doi, match.journal_ref
 
+    def _collect_jalc_candidates(self, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
+        if not title_guess or not contains_japanese_text(title_guess):
+            return []
+
+        jalc = JALCClient(pause_sec=self.pause_sec, email=self.email)
+        collected: list[tuple[ReferenceRecord, str]] = []
+        for hit in jalc.search_title(title_guess, rows=5):
+            doi = hit.get("doi")
+            title = hit.get("title")
+            if not doi:
+                continue
+            work, doi_method = self._resolve_doi_work(doi)
+            if work:
+                collected.append((self._work_to_record(work, source="jalc", source_id=doi), f"jalc-title+{doi_method}"))
+                continue
+            collected.append(
+                (
+                    ReferenceRecord(
+                        title=title,
+                        doi=doi,
+                        source="jalc-search",
+                        source_id=doi,
+                    ),
+                    "jalc-title",
+                )
+            )
+        return collected
+
     def _evaluate_candidates(
         self,
         input_record: ReferenceRecord,
@@ -544,6 +574,7 @@ class CrossrefClient:
             input_record.authors,
         )
         raw_candidates.extend(arxiv_candidates)
+        raw_candidates.extend(self._collect_jalc_candidates(title_guess))
 
         verified = self._evaluate_candidates(input_record, raw_candidates, mode="verification")
         accepted = [candidate for candidate in verified if candidate.score.decision == "accept"]

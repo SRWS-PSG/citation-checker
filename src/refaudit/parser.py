@@ -6,6 +6,7 @@ import unicodedata
 from .scoring import ReferenceRecord, normalize_author_name
 
 DOI_REGEX = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
+JAPANESE_CHAR_REGEX = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
 
 # arXiv ID patterns:
 # New format: 2307.06464, 2307.06464v1, 2307.06464v2
@@ -91,6 +92,10 @@ def extract_arxiv_id(text: str) -> str | None:
     return None
 
 
+def contains_japanese_text(text: str | None) -> bool:
+    return bool(JAPANESE_CHAR_REGEX.search(text or ""))
+
+
 def is_website_reference(text: str) -> bool:
     """Detect if a reference line is a website/software reference (not a journal article).
 
@@ -166,6 +171,7 @@ def _normalize_reference_line(ref_line: str) -> str:
     text = unicodedata.normalize("NFKC", ref_line or "")
     text = text.replace("．", ".").replace("，", ",").replace("：", ":").replace("；", ";")
     text = text.replace("（", "(").replace("）", ")").replace("・", " ・ ")
+    text = re.sub(r"(?<=[\u3040-\u30ff\u3400-\u9fff])\s+(?=[\u3040-\u30ff\u3400-\u9fff])", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -203,6 +209,7 @@ def extract_authors(ref_line: str) -> list[str]:
     normalized = normalized.replace(" and ", ", ")
     normalized = normalized.replace(" & ", ", ")
     normalized = normalized.replace(" ・ ", ", ")
+    normalized = normalized.replace("・", ", ")
     normalized = normalized.replace(";", ",")
 
     authors: list[str] = []
