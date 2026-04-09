@@ -154,6 +154,18 @@ function classify(result) {
   if (result.error) {
     return { kind: "error", label: "エラー" };
   }
+  if (result.status === "likely_wrong") {
+    return { kind: "likely-wrong", label: "誤引用候補" };
+  }
+  if (result.status === "website") {
+    return { kind: "website", label: "ウェブサイト" };
+  }
+  if (result.status === "not_found") {
+    return { kind: "not-found", label: "未発見" };
+  }
+  if (result.status === "found" && result.note === "year_warning") {
+    return { kind: "year-warning", label: "年注意" };
+  }
   if (result.is_website) {
     return { kind: "website", label: "ウェブサイト" };
   }
@@ -194,6 +206,7 @@ function renderResults(results) {
     if (result.doi) rows.push(`DOI: ${result.doi}`);
     if (result.method) rows.push(`判定経路: ${result.method}`);
     if (result.note && result.note !== "website_reference") rows.push(`注記: ${result.note}`);
+    if (result.comparison_summary) rows.push(`比較: ${result.comparison_summary}`);
     if (result.arxiv_id) rows.push(`arXiv ID: ${result.arxiv_id}`);
     if (result.arxiv_doi) rows.push(`出版版DOI: ${result.arxiv_doi}`);
     if (result.journal_ref) rows.push(`Journal ref: ${result.journal_ref}`);
@@ -205,6 +218,14 @@ function renderResults(results) {
     if (Array.isArray(result.suggestions)) {
       for (const item of result.suggestions) {
         rows.push(`提案: ${item}`);
+      }
+    }
+    if (Array.isArray(result.candidates)) {
+      for (const candidate of result.candidates) {
+        const titleText = candidate.title || "候補";
+        const score = typeof candidate.score === "number" ? `score=${candidate.score}` : "";
+        const summary = candidate.field_summary ? ` / ${candidate.field_summary}` : "";
+        rows.push(`候補: ${titleText}${score ? ` (${score})` : ""}${summary}`);
       }
     }
     if (result.error && result.message) {
@@ -229,6 +250,7 @@ function updateSummary(results) {
   const counts = {
     ok: 0,
     "not-found": 0,
+    "likely-wrong": 0,
     retracted: 0,
     website: 0,
     "year-warning": 0,
@@ -239,7 +261,7 @@ function updateSummary(results) {
     counts[classify(result).kind] += 1;
   }
 
-  summaryText.textContent = `正常 ${counts.ok} / 未発見 ${counts["not-found"]} / 撤回 ${counts.retracted} / 年注意 ${counts["year-warning"]} / ウェブサイト ${counts.website} / エラー ${counts.error}`;
+  summaryText.textContent = `正常 ${counts.ok} / 誤引用候補 ${counts["likely-wrong"]} / 未発見 ${counts["not-found"]} / 撤回 ${counts.retracted} / 年注意 ${counts["year-warning"]} / ウェブサイト ${counts.website} / エラー ${counts.error}`;
 }
 
 function escapeInlineCode(value) {
@@ -249,13 +271,13 @@ function escapeInlineCode(value) {
 function buildMarkdown(results) {
   const bad = results.filter((result) => {
     const state = classify(result).kind;
-    return ["not-found", "retracted", "year-warning", "error"].includes(state);
+    return ["likely-wrong", "not-found", "retracted", "year-warning", "error"].includes(state);
   });
 
   const lines = [
     "# Reference Audit Report",
     "",
-    "対象：貼り付けテキストのうち **問題があった書誌**（未発見／撤回系）だけを列挙しています。",
+    "対象：貼り付けテキストのうち **問題があった書誌**（未発見／誤引用候補／撤回系）だけを列挙しています。",
     "",
   ];
 
@@ -266,6 +288,25 @@ function buildMarkdown(results) {
 
   for (const result of bad) {
     const state = classify(result).kind;
+    if (state === "likely-wrong") {
+      lines.push("## ⚠️ Likely Wrong Citation", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
+      if (result.title) lines.push(`- 最有力候補: **${result.title}**`);
+      if (result.doi) lines.push(`- DOI: \`${result.doi}\``);
+      if (result.comparison_summary) lines.push(`- 比較: ${result.comparison_summary}`);
+      if (Array.isArray(result.candidates) && result.candidates.length) {
+        lines.push("", "### 修正候補", "");
+        for (const candidate of result.candidates) {
+          lines.push(`- **${candidate.title || "候補"}**`);
+          if (candidate.doi) lines.push(`- DOI: \`${candidate.doi}\``);
+          if (candidate.field_summary) lines.push(`- 比較: ${candidate.field_summary}`);
+          lines.push("");
+        }
+      } else {
+        lines.push("");
+      }
+      continue;
+    }
+
     if (state === "year-warning") {
       lines.push("## △ 出版年注意", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.title) lines.push(`- マッチ: **${result.title}**`);
@@ -363,6 +404,7 @@ async function runAudit() {
         latestResults.push({
           input_text: ref,
           found: false,
+          status: "not_found",
           retracted: false,
           is_website: false,
           error: true,

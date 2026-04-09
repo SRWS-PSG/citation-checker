@@ -189,6 +189,7 @@ button:disabled {
 }
 
 .result-card.ok { border-left-color: var(--ok); }
+.result-card.likely-wrong { border-left-color: var(--warn); }
 .result-card.not-found { border-left-color: var(--bad); }
 .result-card.retracted { border-left-color: var(--bad); }
 .result-card.website { border-left-color: var(--soft); }
