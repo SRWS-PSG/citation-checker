@@ -584,6 +584,8 @@ class CrossrefClient:
         arxiv_id, arxiv_doi, journal_ref = None, None, None
         if not self.budget.expired:
             raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
+        else:
+            self.budget.skipped.append("pubmed")
         if not self.budget.expired:
             arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
                 input_arxiv_id,
@@ -591,8 +593,12 @@ class CrossrefClient:
                 input_record.authors,
             )
             raw_candidates.extend(arxiv_candidates)
+        else:
+            self.budget.skipped.append("arxiv")
         if not self.budget.expired:
             raw_candidates.extend(self._collect_jalc_candidates(title_guess))
+        else:
+            self.budget.skipped.append("jalc")
 
         verified = self._evaluate_candidates(input_record, raw_candidates, mode="verification")
         accepted = [candidate for candidate in verified if candidate.score.decision == "accept"]

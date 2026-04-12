@@ -11,6 +11,7 @@ class TimeBudget:
     def __init__(self, total_seconds: float = 55.0):
         self._start = time.monotonic()
         self._total = total_seconds
+        self.skipped: list[str] = []
 
     @property
     def elapsed(self) -> float:
@@ -30,6 +31,14 @@ class TimeBudget:
         if remaining <= 0:
             return 0.5
         return min(default, remaining)
+
+    def diagnostics(self) -> dict:
+        """Return diagnostics dict to embed in API response."""
+        return {
+            "elapsed_sec": round(self.elapsed, 2),
+            "budget_sec": self._total,
+            "skipped": self.skipped,
+        }
 
 
 # Sentinel: no budget constraint (CLI usage).

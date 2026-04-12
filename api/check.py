@@ -48,7 +48,7 @@ def handle_check(payload: dict) -> tuple[int, dict]:
     ref, email = validate_payload(payload)
     budget = TimeBudget(total_seconds=WEB_BUDGET_SEC)
     result = check_reference_payload(ref, email=email, pause_sec=WEB_PAUSE_SEC, budget=budget)
-    return 200, {"ok": True, "result": result}
+    return 200, {"ok": True, "result": result, "diagnostics": budget.diagnostics()}
 
 
 class handler(BaseHTTPRequestHandler):

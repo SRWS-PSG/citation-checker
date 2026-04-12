@@ -11,6 +11,7 @@ const resultsEl = document.getElementById("results");
 const template = document.getElementById("result-template");
 
 let latestResults = [];
+let latestDiagnostics = [];
 
 const FIELD_LABEL = {
   title: "📄 タイトル",
@@ -329,7 +330,7 @@ function escapeInlineCode(value) {
   return String(value || "").replace(/`/g, "\\`");
 }
 
-function buildMarkdown(results, inputText) {
+function buildMarkdown(results, inputText, diagnosticsList) {
   const counts = {
     ok: 0,
     "not-found": 0,
@@ -442,6 +443,32 @@ function buildMarkdown(results, inputText) {
     lines.push("");
   }
 
+  // --- Diagnostics section ---
+  if (Array.isArray(diagnosticsList) && diagnosticsList.length > 0) {
+    const hasErrors = results.some((r) => r.error);
+    lines.push("---", "", "## Diagnostics", "");
+    if (hasErrors) {
+      lines.push(
+        "> **エラーが発生しています。** 問題が解消しない場合、このレポートファイルを開発者にお送りください。",
+        ""
+      );
+    }
+    lines.push("| # | elapsed (s) | budget (s) | skipped | error |");
+    lines.push("|---|---|---|---|---|");
+    for (let i = 0; i < diagnosticsList.length; i += 1) {
+      const d = diagnosticsList[i];
+      if (!d) {
+        lines.push(`| ${i + 1} | - | - | - | - |`);
+      } else if (d.error) {
+        lines.push(`| ${i + 1} | - | - | - | ${d.error} |`);
+      } else {
+        const skipped = (d.skipped && d.skipped.length > 0) ? d.skipped.join(", ") : "-";
+        lines.push(`| ${i + 1} | ${d.elapsed_sec ?? "-"} | ${d.budget_sec ?? "-"} | ${skipped} | - |`);
+      }
+    }
+    lines.push("");
+  }
+
   return lines.join("\n");
 }
 
@@ -466,7 +493,7 @@ async function checkReference(ref, email) {
     throw new Error(message);
   }
 
-  return payload.result;
+  return { result: payload.result, diagnostics: payload.diagnostics || null };
 }
 
 async function runAudit() {
@@ -489,6 +516,7 @@ async function runAudit() {
   runButton.disabled = true;
   downloadButton.disabled = true;
   latestResults = [];
+  latestDiagnostics = [];
   renderResults(latestResults);
   updateSummary(latestResults);
 
@@ -497,8 +525,9 @@ async function runAudit() {
       const ref = refs[index];
       statusText.textContent = `${index + 1}/${refs.length} チェック中...`;
       try {
-        const result = await checkReference(ref, email);
+        const { result, diagnostics } = await checkReference(ref, email);
         latestResults.push(result);
+        latestDiagnostics.push(diagnostics);
       } catch (error) {
         latestResults.push({
           input_text: ref,
@@ -510,6 +539,7 @@ async function runAudit() {
           message: error instanceof Error ? error.message : "request_failed",
           retraction_details: [],
         });
+        latestDiagnostics.push({ error: error instanceof Error ? error.message : "request_failed" });
       }
       renderResults(latestResults);
       updateSummary(latestResults);
@@ -523,7 +553,7 @@ async function runAudit() {
 }
 
 function downloadMarkdown() {
-  const markdown = buildMarkdown(latestResults, referencesInput.value);
+  const markdown = buildMarkdown(latestResults, referencesInput.value, latestDiagnostics);
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
