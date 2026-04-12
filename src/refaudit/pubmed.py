@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import re
 
 import requests
+from .budget import NO_BUDGET, TimeBudget
 from .etiquette import build_user_agent, resolve_contact_email
 
 
@@ -27,17 +28,20 @@ class PubMedMatch:
 
 
 class PubMedClient:
-    def __init__(self, pause_sec: float = 0.2, email: str | None = None):
+    def __init__(self, pause_sec: float = 0.2, email: str | None = None, budget: TimeBudget | None = None):
         self.session = requests.Session()
         self.email = resolve_contact_email(email)
         self.session.headers.update({"User-Agent": build_user_agent(self.email)})
         self.pause_sec = pause_sec
+        self.budget = budget or NO_BUDGET
 
     def _get_json(self, url: str, params: dict) -> dict | None:
+        if self.budget.expired:
+            return None
         # E-utilities etiquette
         params = {**params, "tool": "ref-audit", "email": self.email}
         try:
-            r = self.session.get(url, params=params, timeout=30)
+            r = self.session.get(url, params=params, timeout=self.budget.http_timeout(10.0))
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return r.json()
@@ -45,9 +49,11 @@ class PubMedClient:
             return None
 
     def _get_text(self, url: str, params: dict) -> str | None:
+        if self.budget.expired:
+            return None
         params = {**params, "tool": "ref-audit", "email": self.email}
         try:
-            r = self.session.get(url, params=params, timeout=30)
+            r = self.session.get(url, params=params, timeout=self.budget.http_timeout(10.0))
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return r.text

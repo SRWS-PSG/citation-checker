@@ -63,7 +63,7 @@ def test_validate_payload_rejects_invalid_email():
 def test_handle_check_returns_payload(monkeypatch):
     monkeypatch.setattr(
         "api.check.check_reference_payload",
-        lambda ref, email, pause_sec=0.05: {
+        lambda ref, email, pause_sec=0.05, budget=None: {
             "input_text": ref,
             "doi": None,
             "title": None,

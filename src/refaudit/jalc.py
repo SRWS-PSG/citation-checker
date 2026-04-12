@@ -5,6 +5,7 @@ import time
 
 import requests
 
+from .budget import NO_BUDGET, TimeBudget
 from .etiquette import build_user_agent
 from .parser import contains_japanese_text
 
@@ -17,14 +18,17 @@ def _normalize_title_query(title: str) -> str:
 
 
 class JALCClient:
-    def __init__(self, pause_sec: float = 0.2, email: str | None = None):
+    def __init__(self, pause_sec: float = 0.2, email: str | None = None, budget: TimeBudget | None = None):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": build_user_agent(email)})
         self.pause_sec = pause_sec
+        self.budget = budget or NO_BUDGET
 
     def _get(self, params: dict[str, str | int]) -> dict | None:
+        if self.budget.expired:
+            return None
         try:
-            response = self.session.get(API, params=params, timeout=30)
+            response = self.session.get(API, params=params, timeout=self.budget.http_timeout(10.0))
             response.raise_for_status()
             time.sleep(self.pause_sec)
             return response.json()

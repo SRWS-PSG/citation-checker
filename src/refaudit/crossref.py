@@ -9,6 +9,7 @@ import urllib.parse
 import requests
 
 from .arxiv import ArxivClient, ArxivMatch
+from .budget import NO_BUDGET, TimeBudget
 from .doi_resolver import DOIResolver
 from .jalc import JALCClient
 from .etiquette import build_user_agent
@@ -124,6 +125,7 @@ class CrossrefClient:
         strict: bool = True,
         debug: bool = False,
         email: str | None = None,
+        budget: TimeBudget | None = None,
     ):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": build_user_agent(email)})
@@ -131,11 +133,14 @@ class CrossrefClient:
         self.strict = strict
         self.debug = debug
         self.email = email
+        self.budget = budget or NO_BUDGET
         self._doi_cache: dict[str, tuple[dict | None, str]] = {}
 
     def _get(self, url: str, params: dict | None = None):
+        if self.budget.expired:
+            return None
         try:
-            response = self.session.get(url, params=params, timeout=30)
+            response = self.session.get(url, params=params, timeout=self.budget.http_timeout(10.0))
             response.raise_for_status()
             time.sleep(self.pause_sec)
             return response.json()
@@ -217,7 +222,7 @@ class CrossrefClient:
         if doi in self._doi_cache:
             return self._doi_cache[doi]
 
-        resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email)
+        resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
         ra = resolver.detect_ra(doi)
         if ra == "Crossref":
             result = (self.get_work(doi), "doi-crossref")
@@ -412,7 +417,7 @@ class CrossrefClient:
         return [(self._work_to_record(item, source="crossref"), "bibliographic") for item in items]
 
     def _collect_pubmed_candidates(self, input_text: str, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
-        pubmed = PubMedClient(email=self.email)
+        pubmed = PubMedClient(email=self.email, budget=self.budget)
         seen: set[tuple[str | None, str | None]] = set()
         collected: list[tuple[ReferenceRecord, str]] = []
         for hit in pubmed.search_full_citation(input_text):
@@ -439,7 +444,7 @@ class CrossrefClient:
         if not arxiv_id and not title_guess:
             return [], None, None, None
 
-        arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0))
+        arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0), budget=self.budget)
         collected: list[tuple[ReferenceRecord, str]] = []
         match: ArxivMatch | None = None
         method = "arxiv-no-query"
@@ -467,7 +472,7 @@ class CrossrefClient:
         if not title_guess or not contains_japanese_text(title_guess):
             return []
 
-        jalc = JALCClient(pause_sec=self.pause_sec, email=self.email)
+        jalc = JALCClient(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
         collected: list[tuple[ReferenceRecord, str]] = []
         for hit in jalc.search_title(title_guess, rows=5):
             doi = hit.get("doi")
@@ -576,14 +581,18 @@ class CrossrefClient:
             return self._result_from_candidate(input_text, input_record, candidate, status, note)
 
         raw_candidates = self._collect_crossref_candidates(input_text)
-        raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
-        arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
-            input_arxiv_id,
-            title_guess,
-            input_record.authors,
-        )
-        raw_candidates.extend(arxiv_candidates)
-        raw_candidates.extend(self._collect_jalc_candidates(title_guess))
+        arxiv_id, arxiv_doi, journal_ref = None, None, None
+        if not self.budget.expired:
+            raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
+        if not self.budget.expired:
+            arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
+                input_arxiv_id,
+                title_guess,
+                input_record.authors,
+            )
+            raw_candidates.extend(arxiv_candidates)
+        if not self.budget.expired:
+            raw_candidates.extend(self._collect_jalc_candidates(title_guess))
 
         verified = self._evaluate_candidates(input_record, raw_candidates, mode="verification")
         accepted = [candidate for candidate in verified if candidate.score.decision == "accept"]

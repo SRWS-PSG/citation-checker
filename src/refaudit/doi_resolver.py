@@ -18,6 +18,7 @@ import time
 from dataclasses import dataclass
 
 import requests
+from .budget import NO_BUDGET, TimeBudget
 from .etiquette import build_user_agent
 
 DOIRA_API = "https://doi.org/doiRA"
@@ -50,17 +51,20 @@ class DOIResolver:
     3. Fall back to doi.org content negotiation (universal)
     """
     
-    def __init__(self, pause_sec: float = 0.2, email: str | None = None):
+    def __init__(self, pause_sec: float = 0.2, email: str | None = None, budget: TimeBudget | None = None):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": build_user_agent(email)})
         self.pause_sec = pause_sec
-    
+        self.budget = budget or NO_BUDGET
+
     def _get_json(self, url: str, params: dict | None = None, headers: dict | None = None) -> dict | None:
+        if self.budget.expired:
+            return None
         try:
             req_headers = {**self.session.headers}
             if headers:
                 req_headers.update(headers)
-            r = self.session.get(url, params=params, headers=req_headers, timeout=30)
+            r = self.session.get(url, params=params, headers=req_headers, timeout=self.budget.http_timeout(10.0))
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return r.json()
@@ -70,12 +74,14 @@ class DOIResolver:
     def detect_ra(self, doi: str) -> str | None:
         """
         Detect the Registration Agency for a DOI using the doiRA service.
-        
+
         Returns the RA name (e.g., 'Crossref', 'DataCite', 'JaLC') or None if detection fails.
         """
+        if self.budget.expired:
+            return None
         url = f"{DOIRA_API}/{doi}"
         try:
-            r = self.session.get(url, timeout=30)
+            r = self.session.get(url, timeout=self.budget.http_timeout(10.0))
             r.raise_for_status()
             time.sleep(self.pause_sec)
             data = r.json()
@@ -94,8 +100,10 @@ class DOIResolver:
         url = f"https://doi.org/{doi}"
         headers = {"Accept": "application/vnd.citationstyles.csl+json;q=1.0"}
         
+        if self.budget.expired:
+            return None
         try:
-            r = self.session.get(url, headers=headers, timeout=30, allow_redirects=True)
+            r = self.session.get(url, headers=headers, timeout=self.budget.http_timeout(10.0), allow_redirects=True)
             r.raise_for_status()
             time.sleep(self.pause_sec)
             data = r.json()

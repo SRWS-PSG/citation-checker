@@ -12,6 +12,7 @@ SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from refaudit.budget import TimeBudget
 from refaudit.web import check_reference_payload
 
 EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
@@ -40,9 +41,13 @@ def validate_payload(payload: dict) -> tuple[str, str]:
     return ref, email
 
 
+WEB_BUDGET_SEC = 55.0  # Vercel maxDuration=60s, keep 5s buffer
+
+
 def handle_check(payload: dict) -> tuple[int, dict]:
     ref, email = validate_payload(payload)
-    result = check_reference_payload(ref, email=email, pause_sec=WEB_PAUSE_SEC)
+    budget = TimeBudget(total_seconds=WEB_BUDGET_SEC)
+    result = check_reference_payload(ref, email=email, pause_sec=WEB_PAUSE_SEC, budget=budget)
     return 200, {"ok": True, "result": result}
 
 

@@ -18,6 +18,8 @@ from dataclasses import dataclass, field
 
 import requests
 
+from .budget import NO_BUDGET, TimeBudget
+
 ARXIV_API = "https://export.arxiv.org/api/query"
 ATOM_NS = "http://www.w3.org/2005/Atom"
 ARXIV_NS = "http://arxiv.org/schemas/atom"
@@ -60,17 +62,20 @@ def _normalize_arxiv_text(s: str) -> str:
 class ArxivClient:
     """Client for arXiv ATOM API."""
 
-    def __init__(self, pause_sec: float = 3.0):
+    def __init__(self, pause_sec: float = 3.0, budget: TimeBudget | None = None):
         self.session = requests.Session()
         self.session.headers.update({
             "User-Agent": "ref-audit/0.1 (citation checker tool)"
         })
         self.pause_sec = pause_sec
+        self.budget = budget or NO_BUDGET
 
     def _get_xml(self, params: dict) -> ET.Element | None:
         """Fetch arXiv API and parse XML response."""
+        if self.budget.expired:
+            return None
         try:
-            r = self.session.get(ARXIV_API, params=params, timeout=30)
+            r = self.session.get(ARXIV_API, params=params, timeout=self.budget.http_timeout(10.0))
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return ET.fromstring(r.text)
