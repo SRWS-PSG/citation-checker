@@ -12,6 +12,7 @@ from .arxiv import ArxivClient, ArxivMatch
 from .budget import NO_BUDGET, TimeBudget
 from .doi_resolver import DOIResolver
 from .jalc import JALCClient
+from .nlm import NLMCatalogClient
 from .etiquette import build_user_agent
 from .parser import (
     contains_japanese_text,
@@ -102,11 +103,19 @@ def _is_preprint_work(work: dict) -> bool:
 def _merge_records(primary: ReferenceRecord, secondary: ReferenceRecord | None) -> ReferenceRecord:
     if secondary is None:
         return primary
+    venue_aliases: list[str] = []
+    seen_aliases: set[str] = set()
+    for value in [*primary.venue_aliases, *secondary.venue_aliases]:
+        cleaned = (value or "").strip()
+        if cleaned and cleaned not in seen_aliases:
+            seen_aliases.add(cleaned)
+            venue_aliases.append(cleaned)
     return ReferenceRecord(
         title=primary.title or secondary.title,
         authors=primary.authors or secondary.authors,
         year=primary.year or secondary.year,
         venue=primary.venue or secondary.venue,
+        venue_aliases=venue_aliases,
         volume=primary.volume or secondary.volume,
         issue=primary.issue or secondary.issue,
         page=primary.page or secondary.page,
@@ -135,6 +144,7 @@ class CrossrefClient:
         self.email = email
         self.budget = budget or NO_BUDGET
         self._doi_cache: dict[str, tuple[dict | None, str]] = {}
+        self._nlm = NLMCatalogClient(pause_sec=pause_sec, email=email, budget=self.budget)
 
     def _get(self, url: str, params: dict | None = None):
         if self.budget.expired:
@@ -155,7 +165,7 @@ class CrossrefClient:
         params = {
             "query.bibliographic": ref,
             "rows": rows,
-            "select": "DOI,title,issued,published-print,published-online,container-title,volume,issue,page,type,author",
+            "select": "DOI,title,issued,published-print,published-online,container-title,ISSN,volume,issue,page,type,author",
         }
         payload = self._get(API, params)
         if not payload:
@@ -256,11 +266,15 @@ class CrossrefClient:
 
     def _work_to_record(self, work: dict, source: str, source_id: str | None = None) -> ReferenceRecord:
         page = work.get("page")
+        venue = (work.get("container-title") or [None])[0]
+        issns = work.get("ISSN") or []
+        venue_aliases = self._nlm.journal_aliases(title=venue, issns=issns)
         return ReferenceRecord(
             title=(work.get("title") or [None])[0],
             authors=_extract_crossref_authors(work),
             year=_published_year(work),
-            venue=(work.get("container-title") or [None])[0],
+            venue=venue,
+            venue_aliases=venue_aliases,
             volume=work.get("volume"),
             issue=work.get("issue"),
             page=page,
@@ -272,11 +286,13 @@ class CrossrefClient:
         )
 
     def _pubmed_to_record(self, hit: PubMedMatch) -> ReferenceRecord:
+        venue_aliases = [value for value in (hit.journal, hit.journal_full) if value]
         return ReferenceRecord(
             title=hit.title,
             authors=[normalize_author_name(author) for author in hit.authors if normalize_author_name(author)],
             year=hit.year,
             venue=hit.journal,
+            venue_aliases=venue_aliases,
             volume=hit.volume,
             issue=hit.issue,
             page=hit.pages,

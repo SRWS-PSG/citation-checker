@@ -22,6 +22,7 @@ class PubMedMatch:
     authors: list[str] = field(default_factory=list)
     year: int | None = None
     journal: str | None = None
+    journal_full: str | None = None
     volume: str | None = None
     issue: str | None = None
     pages: str | None = None
@@ -195,6 +196,7 @@ class PubMedClient:
                 year_match = re.search(r"\b((?:19|20)\d{2})\b", pubdate)
                 year = int(year_match.group(1)) if year_match else None
                 journal = item.get("source") or None
+                journal_full = item.get("fulljournalname") or None
                 volume = item.get("volume") or None
                 issue = item.get("issue") or None
                 pages = item.get("pages") or None
@@ -211,6 +213,7 @@ class PubMedClient:
                         authors=authors,
                         year=year,
                         journal=journal,
+                        journal_full=journal_full,
                         volume=volume,
                         issue=issue,
                         pages=pages,

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from refaudit.crossref import CrossrefClient, MatchResult
+from refaudit.crossref import CrossrefClient, MatchResult, _merge_records
 from refaudit.main import run
 from refaudit.parser import extract_authors, parse_reference_metadata
 from refaudit.pubmed import PubMedMatch
@@ -53,10 +53,83 @@ def test_field_diffs_classify_venue_abbrev_year_near_and_missing_pages():
     assert diffs["authors"]["state"] == "ok"
     assert diffs["year"]["state"] == "near"
     assert diffs["year"]["reason"] and "1年" in diffs["year"]["reason"]
-    assert diffs["venue"]["state"] == "abbrev"
-    assert "略記" in (diffs["venue"]["reason"] or "")
+    assert diffs["venue"]["state"] == "ok"
+    assert "略誌名" in (diffs["venue"]["reason"] or "")
     assert diffs["pages"]["state"] == "missing_input"
     assert diffs["pages"]["reason"] == "入力に記載なし"
+
+
+def test_field_diffs_accept_medium_suffix_as_same_venue():
+    reference = ReferenceRecord(
+        title="Imaging paper",
+        authors=["smith"],
+        year=2024,
+        venue="Radiology [Internet]",
+    )
+    candidate = ReferenceRecord(
+        title="Imaging paper",
+        authors=["smith"],
+        year=2024,
+        venue="Radiology",
+    )
+
+    diffs = score_candidate(reference, candidate, mode="verification").field_diffs
+    assert diffs["venue"]["state"] == "ok"
+
+
+def test_field_diffs_accept_pubmed_journal_aliases():
+    reference = ReferenceRecord(
+        title="Digital therapeutics paper",
+        authors=["smith"],
+        year=2024,
+        venue="Digit Health [Internet]",
+    )
+    candidate = ReferenceRecord(
+        title="Digital therapeutics paper",
+        authors=["smith"],
+        year=2024,
+        venue="DIGITAL HEALTH",
+        venue_aliases=["Digit Health", "Digital health"],
+    )
+
+    diffs = score_candidate(reference, candidate, mode="verification").field_diffs
+    assert diffs["venue"]["state"] == "ok"
+    assert "許容" in (diffs["venue"]["reason"] or "") or diffs["venue"]["reason"] is None
+
+
+def test_field_diffs_downgrade_venue_only_difference_when_identity_is_strong():
+    reference = ReferenceRecord(
+        title="Strongly matching paper",
+        authors=["smith", "doe"],
+        year=2024,
+        venue="Obscure Imaging Reports [Internet]",
+        volume="12",
+        issue="3",
+        page="101-110",
+    )
+    candidate = ReferenceRecord(
+        title="Strongly matching paper",
+        authors=["smith", "doe"],
+        year=2024,
+        venue="Journal of Diagnostic Imaging",
+        volume="12",
+        issue="3",
+        page="101-110",
+    )
+
+    diffs = score_candidate(reference, candidate, mode="verification").field_diffs
+    assert diffs["venue"]["state"] == "unverified"
+    assert "別表記" in (diffs["venue"]["reason"] or "")
+
+
+def test_merge_records_preserves_venue_aliases():
+    primary = ReferenceRecord(venue="Nat Med", venue_aliases=["Nat Med", "Nature medicine"])
+    secondary = ReferenceRecord(venue="Nature Medicine", venue_aliases=["Nature Medicine", "Nature medicine"])
+
+    merged = _merge_records(primary, secondary)
+
+    assert merged.venue == "Nat Med"
+    assert merged.venue_aliases == ["Nat Med", "Nature medicine", "Nature Medicine"]
 
 
 def test_extract_authors_handles_and_and_japanese_separator():
@@ -386,6 +459,32 @@ def test_pubmed_candidates_do_not_resolve_every_doi(monkeypatch):
     result = CrossrefClient(pause_sec=0).check_one(input_ref)
     assert result.status == "found"
     assert calls == ["10.2196/12959"]
+
+
+def test_crossref_record_uses_nlm_title_fallback_without_issn(monkeypatch):
+    aliases_called: list[tuple[str | None, list[str]]] = []
+
+    monkeypatch.setattr(
+        "refaudit.crossref.NLMCatalogClient.journal_aliases",
+        lambda self, title=None, issns=None: aliases_called.append((title, issns or [])) or ["Nature medicine", "Nat Med"],
+    )
+
+    work = _work(
+        "10.1000/test",
+        "Example title",
+        ["Smith"],
+        2024,
+        "Nature Medicine",
+        "1",
+        "1",
+        "1-5",
+    )
+
+    client = CrossrefClient(pause_sec=0)
+    record = client._work_to_record(work, source="crossref")
+
+    assert aliases_called == [("Nature Medicine", [])]
+    assert "Nat Med" in record.venue_aliases
 
 
 def test_jalc_title_fallback_flags_japanese_miscitation(monkeypatch):

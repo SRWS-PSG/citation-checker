@@ -23,6 +23,7 @@ class ReferenceRecord:
     authors: list[str] = field(default_factory=list)
     year: int | None = None
     venue: str | None = None
+    venue_aliases: list[str] = field(default_factory=list)
     volume: str | None = None
     issue: str | None = None
     page: str | None = None
@@ -46,6 +47,14 @@ class CandidateScore:
 
 def normalize_text(value: str | None) -> str:
     text = unicodedata.normalize("NFKC", value or "").lower()
+    text = re.sub(r"[^\w\s]", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def normalize_venue(value: str | None) -> str:
+    text = unicodedata.normalize("NFKC", value or "").lower()
+    text = re.sub(r"\[(?:internet|online|electronic resource|print)\]", " ", text)
+    text = re.sub(r"\b(?:internet|online|electronic resource)\b", " ", text)
     text = re.sub(r"[^\w\s]", " ", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -126,8 +135,12 @@ def year_similarity(input_year: int | None, candidate_year: int | None) -> float
 
 
 def venue_similarity(left: str | None, right: str | None) -> float:
-    overlap = _token_overlap(left, right)
-    seq = _sequence_similarity(left, right)
+    left_norm = normalize_venue(left)
+    right_norm = normalize_venue(right)
+    if left_norm and right_norm and left_norm == right_norm:
+        return 1.0
+    overlap = _token_overlap(left_norm, right_norm)
+    seq = _sequence_similarity(left_norm, right_norm)
     return round(max(overlap, seq), 3)
 
 
@@ -238,8 +251,8 @@ def _looks_like_abbrev(short: str | None, long: str | None) -> bool:
     """簡易判定: 短い側のトークンが順序を保って長い側トークンの prefix になっている"""
     if not short or not long:
         return False
-    short_tokens = [tok for tok in normalize_text(short).split() if tok]
-    long_tokens = [tok for tok in normalize_text(long).split() if tok]
+    short_tokens = [tok for tok in normalize_venue(short).split() if tok]
+    long_tokens = [tok for tok in normalize_venue(long).split() if tok]
     if not short_tokens or not long_tokens or len(short_tokens) > len(long_tokens):
         return False
     j = 0
@@ -252,6 +265,39 @@ def _looks_like_abbrev(short: str | None, long: str | None) -> bool:
     return True
 
 
+def _venue_variants(record: ReferenceRecord) -> list[str]:
+    variants: list[str] = []
+    seen: set[str] = set()
+    for value in [record.venue, *record.venue_aliases]:
+        normalized = normalize_venue(value)
+        if normalized and normalized not in seen:
+            seen.add(normalized)
+            variants.append(normalized)
+    return variants
+
+
+def venue_match_analysis(reference: ReferenceRecord, candidate: ReferenceRecord) -> tuple[float, str | None]:
+    left_variants = _venue_variants(reference)
+    right_variants = _venue_variants(candidate)
+    if not left_variants or not right_variants:
+        return 0.0, None
+    if set(left_variants) & set(right_variants):
+        return 1.0, "alias"
+
+    best = 0.0
+    abbrev = False
+    for left in left_variants:
+        for right in right_variants:
+            if _looks_like_abbrev(left, right) or _looks_like_abbrev(right, left):
+                abbrev = True
+                best = max(best, 0.95)
+            else:
+                best = max(best, venue_similarity(left, right))
+    if abbrev:
+        return round(best, 3), "abbrev"
+    return round(best, 3), None
+
+
 def _classify_field(
     name: str,
     score: float,
@@ -262,6 +308,8 @@ def _classify_field(
     has_candidate: bool,
     input_year: int | None = None,
     candidate_year: int | None = None,
+    venue_match_kind: str | None = None,
+    identity_strong: bool = False,
 ) -> tuple[str, str | None]:
     if not has_input and not has_candidate:
         return "missing_both", None
@@ -272,10 +320,21 @@ def _classify_field(
     if score >= 0.7:
         if name == "year" and input_year is not None and candidate_year is not None and input_year != candidate_year:
             return "near", "1年ずれ（オンライン公開／印刷年の差の可能性）"
+        if name == "venue" and venue_match_kind == "abbrev":
+            return "ok", "正式誌名・略誌名の差として許容"
+        if (
+            name == "venue"
+            and identity_strong
+            and normalize_venue(input_value) != normalize_venue(candidate_value)
+            and venue_match_kind != "alias"
+        ):
+            return "unverified", "論文自体は一致。掲載誌名だけ別表記の可能性"
         return "ok", None
     if name == "venue":
-        if _looks_like_abbrev(input_value, candidate_value) or _looks_like_abbrev(candidate_value, input_value):
+        if venue_match_kind == "abbrev" or _looks_like_abbrev(input_value, candidate_value) or _looks_like_abbrev(candidate_value, input_value):
             return "abbrev", "略記の可能性。許容するか確認"
+        if identity_strong:
+            return "unverified", "論文自体は一致。掲載誌名だけ別表記の可能性"
     if score >= 0.35:
         return "near", None
     return "mismatch", None
@@ -289,8 +348,17 @@ def _build_field_diffs(
     title_score = signals["title_similarity"]
     author_score = max(signals["author_overlap"], signals["first_author_match"])
     year_score = signals["year_similarity"]
-    venue_score = signals["venue_similarity"]
+    venue_score, venue_match_kind = venue_match_analysis(reference, candidate)
     pages_score = max(signals["volume_issue_similarity"], signals["page_similarity"])
+    identity_strong = (
+        title_score >= TITLE_ACCEPT
+        and (author_score >= AUTHOR_OVERLAP_ACCEPT or author_score == 1.0)
+        and (
+            reference.year is None
+            or candidate.year is None
+            or year_score >= 0.7
+        )
+    )
 
     ref_pages_display = _format_pages_display(reference)
     cand_pages_display = _format_pages_display(candidate)
@@ -351,6 +419,8 @@ def _build_field_diffs(
             has_candidate=has_cand,
             input_year=reference.year if name == "year" else None,
             candidate_year=candidate.year if name == "year" else None,
+            venue_match_kind=venue_match_kind if name == "venue" else None,
+            identity_strong=identity_strong if name == "venue" else False,
         )
         diffs[name] = {
             "state": state,
@@ -372,7 +442,7 @@ def score_candidate(
     author_score = author_overlap(reference.authors, candidate.authors)
     first_author_score = first_author_match(reference.authors, candidate.authors)
     year_score = year_similarity(reference.year, candidate.year)
-    venue_score = venue_similarity(reference.venue, candidate.venue)
+    venue_score, _ = venue_match_analysis(reference, candidate)
     volume_issue_score = volume_issue_similarity(
         reference.volume,
         reference.issue,
