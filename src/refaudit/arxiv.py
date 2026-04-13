@@ -70,12 +70,13 @@ class ArxivClient:
         self.pause_sec = pause_sec
         self.budget = budget or NO_BUDGET
 
-    def _get_xml(self, params: dict) -> ET.Element | None:
+    def _get_xml(self, params: dict, *, ignore_budget: bool = False) -> ET.Element | None:
         """Fetch arXiv API and parse XML response."""
-        if self.budget.expired:
+        if self.budget.expired and not ignore_budget:
             return None
         try:
-            r = self.session.get(ARXIV_API, params=params, timeout=self.budget.http_timeout(10.0))
+            timeout = 10.0 if ignore_budget else self.budget.http_timeout(10.0)
+            r = self.session.get(ARXIV_API, params=params, timeout=timeout)
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return ET.fromstring(r.text)
@@ -145,6 +146,10 @@ class ArxivClient:
     def lookup_by_id(self, arxiv_id: str) -> ArxivMatch | None:
         """Look up a paper by arXiv ID (most reliable method).
 
+        ID lookup is a single lightweight API call, so it bypasses
+        the time budget to avoid missing papers whose arXiv ID is
+        already known.
+
         Args:
             arxiv_id: arXiv identifier (e.g., "2307.06464" or "hep-th/9901001")
 
@@ -152,7 +157,7 @@ class ArxivClient:
             ArxivMatch if found, None otherwise.
         """
         clean_id = _strip_version(arxiv_id)
-        root = self._get_xml({"id_list": clean_id, "max_results": "1"})
+        root = self._get_xml({"id_list": clean_id, "max_results": "1"}, ignore_budget=True)
         if root is None:
             return None
 

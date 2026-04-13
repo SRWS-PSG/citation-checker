@@ -602,10 +602,10 @@ class CrossrefClient:
             raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
         else:
             self.budget.skipped.append("pubmed")
-        if not self.budget.expired:
+        if not self.budget.expired or input_arxiv_id:
             arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
                 input_arxiv_id,
-                title_guess,
+                title_guess if not self.budget.expired else None,
                 input_record.authors,
             )
             raw_candidates.extend(arxiv_candidates)
