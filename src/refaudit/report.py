@@ -74,6 +74,18 @@ def _candidate_lines(result: MatchResult) -> list[str]:
     return lines
 
 
+def _verification_lines(result: MatchResult) -> list[str]:
+    if result.verification_status != "partial":
+        return []
+    lines = ["- 検証状態: 一部ソースを検証できませんでした。"]
+    if result.unchecked_sources:
+        lines.append("- 未検証ソース: " + ", ".join(f"`{source}`" for source in result.unchecked_sources))
+    if result.source_errors:
+        joined = ", ".join(f"`{source}`={message}" for source, message in result.source_errors.items())
+        lines.append(f"- ソースエラー: {joined}")
+    return lines
+
+
 def _section_year_warning(result: MatchResult) -> list[str]:
     lines = [
         "## △ 出版年注意",
@@ -89,6 +101,7 @@ def _section_year_warning(result: MatchResult) -> list[str]:
         lines.extend(diff_lines)
     else:
         lines.append("- 注: タイトル・著者は一致していますが、出版年が参照と異なる可能性があります。")
+    lines.extend(_verification_lines(result))
     lines.append("")
     return lines
 
@@ -101,6 +114,8 @@ def _section_not_found(result: MatchResult) -> list[str]:
         f"- 理由: {result.note or '候補なし'}",
         "",
     ]
+    lines.extend(_verification_lines(result))
+    lines.append("")
     if result.candidates:
         lines += ["### 候補", ""]
         lines += _candidate_lines(result)
@@ -124,6 +139,7 @@ def _section_likely_wrong(result: MatchResult) -> list[str]:
     lines.extend(_render_field_diffs(_field_diffs(result)))
     if result.note:
         lines.append(f"- 注記: {result.note}")
+    lines.extend(_verification_lines(result))
     lines.append("")
     if result.candidates:
         lines += ["### 修正候補", ""]
@@ -148,6 +164,7 @@ def _section_retracted(result: MatchResult) -> list[str]:
             f"- 種別: **{detail.get('update_type')}**, 通知DOI: `{detail.get('notice_doi')}`, "
             f"source: `{detail.get('source') or 'N/A'}`, date: `{updated}`"
         )
+    lines.extend(_verification_lines(result))
     lines.append("")
     return lines
 
@@ -161,11 +178,31 @@ def _section_website(result: MatchResult) -> list[str]:
     ]
 
 
+def _section_partial(result: MatchResult) -> list[str]:
+    lines = [
+        "## ⏱ 検証未完了",
+        "",
+        f"- 入力: `{result.input_text}`",
+    ]
+    if result.title:
+        lines.append(f"- 現時点のマッチ: **{result.title}**")
+    if result.doi:
+        lines.append(f"- DOI: `{result.doi}`")
+    if result.comparison_summary:
+        lines.append(f"- 比較: {result.comparison_summary}")
+    lines.extend(_verification_lines(result))
+    lines.append("")
+    return lines
+
+
 def make_markdown_bad_only(results: Iterable[MatchResult]) -> str:
     bad = [
         result
         for result in results
-        if result.status in {"likely_wrong", "not_found"} or result.retracted or result.note == "year_warning"
+        if result.status in {"likely_wrong", "not_found"}
+        or result.retracted
+        or result.note == "year_warning"
+        or result.verification_status == "partial"
     ]
     lines = [
         "# Reference Audit Report",
@@ -180,6 +217,8 @@ def make_markdown_bad_only(results: Iterable[MatchResult]) -> str:
     for result in bad:
         if result.retracted:
             lines += _section_retracted(result)
+        elif result.verification_status == "partial" and result.status == "found":
+            lines += _section_partial(result)
         elif result.note == "year_warning" and result.status == "found":
             lines += _section_year_warning(result)
         elif result.status == "likely_wrong":
@@ -194,12 +233,18 @@ def make_markdown_full(results: Iterable[MatchResult]) -> str:
     bad = [
         result
         for result in results
-        if result.status in {"likely_wrong", "not_found"} or result.retracted or result.note == "year_warning"
+        if result.status in {"likely_wrong", "not_found"}
+        or result.retracted
+        or result.note == "year_warning"
+        or result.verification_status == "partial"
     ]
     ok = [
         result
         for result in results
-        if result.status == "found" and not result.retracted and result.note != "year_warning"
+        if result.status == "found"
+        and not result.retracted
+        and result.note != "year_warning"
+        and result.verification_status != "partial"
     ]
     websites = [result for result in results if result.status == "website"]
     lines = [
@@ -216,6 +261,8 @@ def make_markdown_full(results: Iterable[MatchResult]) -> str:
         for result in bad:
             if result.retracted:
                 lines += _section_retracted(result)
+            elif result.verification_status == "partial" and result.status == "found":
+                lines += _section_partial(result)
             elif result.note == "year_warning" and result.status == "found":
                 lines += _section_year_warning(result)
             elif result.status == "likely_wrong":

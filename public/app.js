@@ -226,6 +226,9 @@ function classify(result) {
   if (result.status === "found" && result.note === "year_warning") {
     return { kind: "year-warning", label: "年注意" };
   }
+  if (result.verification_status === "partial") {
+    return { kind: "partial", label: "未検証あり" };
+  }
   if (result.is_website) {
     return { kind: "website", label: "ウェブサイト" };
   }
@@ -277,6 +280,17 @@ function renderResults(results) {
         rows.push(`更新通知: ${detail.update_type || "N/A"} / ${detail.notice_doi || "N/A"}`);
       }
     }
+    if (result.verification_status === "partial") {
+      rows.push("検証状態: 一部ソースを検証できませんでした。");
+    }
+    if (Array.isArray(result.unchecked_sources) && result.unchecked_sources.length) {
+      rows.push(`未検証ソース: ${result.unchecked_sources.join(", ")}`);
+    }
+    if (result.source_errors && typeof result.source_errors === "object") {
+      for (const [source, message] of Object.entries(result.source_errors)) {
+        rows.push(`ソースエラー: ${source} / ${message}`);
+      }
+    }
     if (Array.isArray(result.suggestions)) {
       for (const item of result.suggestions) {
         rows.push(`提案: ${item}`);
@@ -311,6 +325,7 @@ function renderResults(results) {
 function updateSummary(results) {
   const counts = {
     ok: 0,
+    partial: 0,
     "not-found": 0,
     "likely-wrong": 0,
     retracted: 0,
@@ -323,7 +338,7 @@ function updateSummary(results) {
     counts[classify(result).kind] += 1;
   }
 
-  summaryText.textContent = `正常 ${counts.ok} / 誤引用候補 ${counts["likely-wrong"]} / 未発見 ${counts["not-found"]} / 撤回 ${counts.retracted} / 年注意 ${counts["year-warning"]} / ウェブサイト ${counts.website} / エラー ${counts.error}`;
+  summaryText.textContent = `正常 ${counts.ok} / 未検証あり ${counts.partial} / 誤引用候補 ${counts["likely-wrong"]} / 未発見 ${counts["not-found"]} / 撤回 ${counts.retracted} / 年注意 ${counts["year-warning"]} / ウェブサイト ${counts.website} / エラー ${counts.error}`;
 }
 
 function escapeInlineCode(value) {
@@ -333,6 +348,7 @@ function escapeInlineCode(value) {
 function buildMarkdown(results, inputText, diagnosticsList) {
   const counts = {
     ok: 0,
+    partial: 0,
     "not-found": 0,
     "likely-wrong": 0,
     retracted: 0,
@@ -353,6 +369,7 @@ function buildMarkdown(results, inputText, diagnosticsList) {
   lines.push("## チェック結果", "");
   lines.push(
     `- 正常: ${counts.ok}`,
+    `- 未検証あり: ${counts.partial}`,
     `- 誤引用候補: ${counts["likely-wrong"]}`,
     `- 未発見: ${counts["not-found"]}`,
     `- 撤回: ${counts.retracted}`,
@@ -373,7 +390,7 @@ function buildMarkdown(results, inputText, diagnosticsList) {
   lines.push("## 注意すべき候補", "");
   const bad = results.filter((result) => {
     const state = classify(result).kind;
-    return ["likely-wrong", "not-found", "retracted", "year-warning", "error"].includes(state);
+    return ["partial", "likely-wrong", "not-found", "retracted", "year-warning", "error"].includes(state);
   });
 
   if (!bad.length) {
@@ -383,6 +400,23 @@ function buildMarkdown(results, inputText, diagnosticsList) {
 
   for (const result of bad) {
     const state = classify(result).kind;
+    if (state === "partial") {
+      lines.push("### ⏱ 検証未完了", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
+      if (result.title) lines.push(`- 現時点のマッチ: **${result.title}**`);
+      if (result.doi) lines.push(`- DOI: \`${result.doi}\``);
+      if (result.comparison_summary) lines.push(`- 比較: ${result.comparison_summary}`);
+      if (Array.isArray(result.unchecked_sources) && result.unchecked_sources.length) {
+        lines.push(`- 未検証ソース: ${result.unchecked_sources.join(", ")}`);
+      }
+      if (result.source_errors && typeof result.source_errors === "object") {
+        for (const [source, message] of Object.entries(result.source_errors)) {
+          lines.push(`- ソースエラー: ${source} / ${message}`);
+        }
+      }
+      lines.push("");
+      continue;
+    }
+
     if (state === "likely-wrong") {
       lines.push("### ⚠️ Likely Wrong Citation", "", `- 入力: \`${escapeInlineCode(result.input_text)}\``);
       if (result.title) lines.push(`- 最有力候補: **${result.title}**`);
@@ -463,7 +497,10 @@ function buildMarkdown(results, inputText, diagnosticsList) {
         lines.push(`| ${i + 1} | - | - | - | ${d.error} |`);
       } else {
         const skipped = (d.skipped && d.skipped.length > 0) ? d.skipped.join(", ") : "-";
-        lines.push(`| ${i + 1} | ${d.elapsed_sec ?? "-"} | ${d.budget_sec ?? "-"} | ${skipped} | - |`);
+        const error = d.source_errors && Object.keys(d.source_errors).length > 0
+          ? Object.entries(d.source_errors).map(([source, message]) => `${source}:${message}`).join(", ")
+          : "-";
+        lines.push(`| ${i + 1} | ${d.elapsed_sec ?? "-"} | ${d.budget_sec ?? "-"} | ${skipped} | ${error} |`);
       }
     }
     lines.push("");

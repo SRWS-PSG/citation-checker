@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime
+from threading import Lock
 import time
 from typing import Literal
 import urllib.parse
@@ -60,6 +62,9 @@ class MatchResult:
     comparison_summary: str | None = None
     field_signals: dict[str, str] | None = None
     field_diffs: dict[str, dict] | None = None
+    verification_status: Literal["complete", "partial"] = "complete"
+    unchecked_sources: list[str] | None = None
+    source_errors: dict[str, str] | None = None
 
 
 @dataclass
@@ -67,6 +72,17 @@ class CandidateMatch:
     record: ReferenceRecord
     method: str
     score: CandidateScore
+
+
+@dataclass
+class SourceCollectionResult:
+    source: str
+    candidates: list[tuple[ReferenceRecord, str]]
+    unchecked_reason: str | None = None
+    error: str | None = None
+    arxiv_id: str | None = None
+    arxiv_doi: str | None = None
+    journal_ref: str | None = None
 
 
 def _published_year(work: dict) -> int | None:
@@ -147,9 +163,7 @@ class CrossrefClient:
         self.debug = debug
         self.email = email
         self.budget = budget or NO_BUDGET
-        # This client is intentionally single-threaded. If reference checks are
-        # parallelized later, create one CrossrefClient per worker instead of
-        # sharing these caches and HTTP sessions across threads.
+        self._lock = Lock()
         self._doi_cache: dict[str, tuple[dict | None, str]] = {}
         self._retraction_cache: dict[str, tuple[bool, list[dict]]] = {}
         self._bibliographic_cache: dict[tuple[str, int], list[dict]] = {}
@@ -158,6 +172,10 @@ class CrossrefClient:
         self._pubmed = PubMedClient(pause_sec=pause_sec, email=email, budget=self.budget)
         self._arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0), budget=self.budget)
         self._jalc = JALCClient(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
+
+    def _source_exception(self, exc: Exception) -> str:
+        message = str(exc).strip()
+        return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
     def _get(self, url: str, params: dict | None = None):
         if self.budget.expired:
@@ -176,8 +194,9 @@ class CrossrefClient:
 
     def search_bibliographic_items(self, ref: str, rows: int = 5) -> list[dict]:
         cache_key = (ref, rows)
-        if cache_key in self._bibliographic_cache:
-            return self._bibliographic_cache[cache_key]
+        with self._lock:
+            if cache_key in self._bibliographic_cache:
+                return self._bibliographic_cache[cache_key]
         params = {
             "query.bibliographic": ref,
             "rows": rows,
@@ -187,7 +206,8 @@ class CrossrefClient:
         if not payload:
             return []
         items = payload.get("message", {}).get("items", [])
-        self._bibliographic_cache[cache_key] = items
+        with self._lock:
+            self._bibliographic_cache[cache_key] = items
         return items
 
     def get_work(self, doi: str) -> dict | None:
@@ -216,8 +236,9 @@ class CrossrefClient:
     def is_retracted(self, doi: str | None) -> tuple[bool, list[dict]]:
         if not doi:
             return False, []
-        if doi in self._retraction_cache:
-            return self._retraction_cache[doi]
+        with self._lock:
+            if doi in self._retraction_cache:
+                return self._retraction_cache[doi]
         notices = self.find_updates_for(doi)
         hits: list[dict] = []
         seen: set[tuple[str | None, str | None]] = set()
@@ -240,7 +261,8 @@ class CrossrefClient:
                     }
                 )
         result = (bool(hits), hits)
-        self._retraction_cache[doi] = result
+        with self._lock:
+            self._retraction_cache[doi] = result
         return result
 
     def _doi_metadata_to_work(self, doi_meta) -> dict:
@@ -262,38 +284,32 @@ class CrossrefClient:
         return work
 
     def _resolve_doi_work(self, doi: str) -> tuple[dict | None, str]:
-        if doi in self._doi_cache:
-            return self._doi_cache[doi]
+        with self._lock:
+            if doi in self._doi_cache:
+                return self._doi_cache[doi]
 
         ra = self._resolver.detect_ra(doi)
         if ra == "Crossref":
             result = (self.get_work(doi), "doi-crossref")
-            self._doi_cache[doi] = result
-            return result
-        if ra == "DataCite":
+        elif ra == "DataCite":
             doi_meta = self._resolver.resolve_via_datacite(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-datacite")
-            self._doi_cache[doi] = result
-            return result
-        if ra == "JaLC":
+        elif ra == "JaLC":
             doi_meta = self._resolver.resolve_via_content_negotiation(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-jalc")
-            self._doi_cache[doi] = result
-            return result
-        if ra:
+        elif ra:
             doi_meta = self._resolver.resolve_via_content_negotiation(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), f"doi-{ra.lower()}")
-            self._doi_cache[doi] = result
-            return result
+        else:
+            work = self.get_work(doi)
+            if work:
+                result = (work, "doi-crossref")
+            else:
+                doi_meta = self._resolver.resolve_via_content_negotiation(doi)
+                result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-content-negotiation")
 
-        work = self.get_work(doi)
-        if work:
-            result = (work, "doi-crossref")
+        with self._lock:
             self._doi_cache[doi] = result
-            return result
-        doi_meta = self._resolver.resolve_via_content_negotiation(doi)
-        result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-content-negotiation")
-        self._doi_cache[doi] = result
         return result
 
     def _work_to_record(
@@ -418,6 +434,9 @@ class CrossrefClient:
         arxiv_id: str | None = None,
         arxiv_doi: str | None = None,
         journal_ref: str | None = None,
+        verification_status: Literal["complete", "partial"] = "complete",
+        unchecked_sources: list[str] | None = None,
+        source_errors: dict[str, str] | None = None,
     ) -> MatchResult:
         retracted, details = self.is_retracted(candidate.record.doi)
         candidates_payload = [self._candidate_payload(item) for item in (extra_candidates or [])] or None
@@ -449,6 +468,9 @@ class CrossrefClient:
             comparison_summary=candidate.score.summary,
             field_signals=candidate.score.field_states,
             field_diffs=candidate.score.field_diffs,
+            verification_status=verification_status,
+            unchecked_sources=unchecked_sources or None,
+            source_errors=source_errors or None,
         )
 
     def _sort_candidates(self, candidates: list[CandidateMatch]) -> list[CandidateMatch]:
@@ -592,6 +614,113 @@ class CrossrefClient:
             )
         return collected
 
+    def _collect_crossref_source(self, input_text: str) -> SourceCollectionResult:
+        if self.budget.expired:
+            return SourceCollectionResult(source="crossref", candidates=[], unchecked_reason="budget")
+        try:
+            return SourceCollectionResult(
+                source="crossref",
+                candidates=self._collect_crossref_candidates(input_text),
+            )
+        except Exception as exc:
+            return SourceCollectionResult(source="crossref", candidates=[], error=self._source_exception(exc))
+
+    def _collect_pubmed_source(self, input_text: str, title_guess: str | None) -> SourceCollectionResult:
+        if self.budget.expired:
+            return SourceCollectionResult(source="pubmed", candidates=[], unchecked_reason="budget")
+        try:
+            return SourceCollectionResult(
+                source="pubmed",
+                candidates=self._collect_pubmed_candidates(input_text, title_guess),
+            )
+        except Exception as exc:
+            return SourceCollectionResult(source="pubmed", candidates=[], error=self._source_exception(exc))
+
+    def _collect_arxiv_source(
+        self,
+        arxiv_id: str | None,
+        title_guess: str | None,
+        input_authors: list[str],
+    ) -> SourceCollectionResult:
+        if not arxiv_id and not title_guess:
+            return SourceCollectionResult(source="arxiv", candidates=[])
+        if self.budget.expired and not arxiv_id:
+            return SourceCollectionResult(source="arxiv", candidates=[], unchecked_reason="budget")
+        try:
+            candidates, aid, adoi, jref = self._collect_arxiv_candidates(
+                arxiv_id,
+                title_guess if not self.budget.expired else None,
+                input_authors,
+            )
+            return SourceCollectionResult(
+                source="arxiv",
+                candidates=candidates,
+                arxiv_id=aid,
+                arxiv_doi=adoi,
+                journal_ref=jref,
+            )
+        except Exception as exc:
+            return SourceCollectionResult(
+                source="arxiv", candidates=[], error=self._source_exception(exc), arxiv_id=arxiv_id,
+            )
+
+    def _collect_jalc_source(self, title_guess: str | None) -> SourceCollectionResult:
+        if not title_guess or not contains_japanese_text(title_guess):
+            return SourceCollectionResult(source="jalc", candidates=[])
+        if self.budget.expired:
+            return SourceCollectionResult(source="jalc", candidates=[], unchecked_reason="budget")
+        try:
+            return SourceCollectionResult(
+                source="jalc",
+                candidates=self._collect_jalc_candidates(title_guess),
+            )
+        except Exception as exc:
+            return SourceCollectionResult(source="jalc", candidates=[], error=self._source_exception(exc))
+
+    def _collect_candidates_parallel(
+        self,
+        input_text: str,
+        title_guess: str | None,
+        input_arxiv_id: str | None,
+        input_authors: list[str],
+    ) -> tuple[list[tuple[ReferenceRecord, str]], str | None, str | None, str | None, list[str], dict[str, str]]:
+        tasks = [
+            lambda: self._collect_crossref_source(input_text),
+            lambda: self._collect_pubmed_source(input_text, title_guess),
+        ]
+        if input_arxiv_id or title_guess:
+            tasks.append(lambda: self._collect_arxiv_source(input_arxiv_id, title_guess, input_authors))
+        if title_guess and contains_japanese_text(title_guess):
+            tasks.append(lambda: self._collect_jalc_source(title_guess))
+
+        outcomes: list[SourceCollectionResult] = []
+        with ThreadPoolExecutor(max_workers=len(tasks)) as executor:
+            futures = [executor.submit(task) for task in tasks]
+            for future in futures:
+                outcomes.append(future.result())
+
+        raw_candidates: list[tuple[ReferenceRecord, str]] = []
+        unchecked_sources: list[str] = []
+        source_errors: dict[str, str] = {}
+        arxiv_id = None
+        arxiv_doi = None
+        journal_ref = None
+
+        for outcome in outcomes:
+            raw_candidates.extend(outcome.candidates)
+            if outcome.unchecked_reason == "budget":
+                unchecked_sources.append(outcome.source)
+                self.budget.mark_skipped(outcome.source)
+            if outcome.error:
+                source_errors[outcome.source] = outcome.error
+                self.budget.mark_source_error(outcome.source, outcome.error)
+            if outcome.source == "arxiv":
+                arxiv_id = outcome.arxiv_id
+                arxiv_doi = outcome.arxiv_doi
+                journal_ref = outcome.journal_ref
+
+        return raw_candidates, arxiv_id, arxiv_doi, journal_ref, unchecked_sources, source_errors
+
     def _evaluate_candidates(
         self,
         input_record: ReferenceRecord,
@@ -694,26 +823,12 @@ class CrossrefClient:
                 note = score.note or note or "candidate_mismatch"
             return self._result_from_candidate(input_text, input_record, candidate, status, note)
 
-        raw_candidates = self._collect_crossref_candidates(input_text)
-        arxiv_id, arxiv_doi, journal_ref = None, None, None
-        if not self.budget.expired:
-            raw_candidates.extend(self._collect_pubmed_candidates(input_text, title_guess))
-        else:
-            self.budget.skipped.append("pubmed")
-        if not self.budget.expired or input_arxiv_id:
-            arxiv_candidates, arxiv_id, arxiv_doi, journal_ref = self._collect_arxiv_candidates(
-                input_arxiv_id,
-                title_guess if not self.budget.expired else None,
-                input_record.authors,
-            )
-            raw_candidates.extend(arxiv_candidates)
-        else:
-            self.budget.skipped.append("arxiv")
-        if not self.budget.expired:
-            raw_candidates.extend(self._collect_jalc_candidates(title_guess))
-        else:
-            self.budget.skipped.append("jalc")
-
+        raw_candidates, arxiv_id, arxiv_doi, journal_ref, unchecked_sources, source_errors = self._collect_candidates_parallel(
+            input_text,
+            title_guess,
+            input_arxiv_id,
+            input_record.authors,
+        )
         verified = self._evaluate_candidates(input_record, raw_candidates, mode="verification")
         accepted = [candidate for candidate in verified if candidate.score.decision == "accept"]
         if accepted:
@@ -732,6 +847,10 @@ class CrossrefClient:
                 journal_ref=journal_ref,
             )
 
+        verification_status: Literal["complete", "partial"] = (
+            "partial" if unchecked_sources or source_errors else "complete"
+        )
+
         correction = self._evaluate_candidates(input_record, raw_candidates, mode="correction")
         suggestions = [candidate for candidate in correction if candidate.score.decision == "suggest"]
         if suggestions:
@@ -748,6 +867,9 @@ class CrossrefClient:
                 arxiv_id=arxiv_id,
                 arxiv_doi=arxiv_doi,
                 journal_ref=journal_ref,
+                verification_status=verification_status,
+                unchecked_sources=unchecked_sources,
+                source_errors=source_errors,
             )
 
         debug_candidates = None
@@ -775,4 +897,7 @@ class CrossrefClient:
             arxiv_id=arxiv_id,
             arxiv_doi=arxiv_doi,
             journal_ref=journal_ref,
+            verification_status=verification_status,
+            unchecked_sources=unchecked_sources or None,
+            source_errors=source_errors or None,
         )

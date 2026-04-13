@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-from refaudit.crossref import CrossrefClient, MatchResult, _merge_records
+import time
+
+from refaudit.crossref import CandidateMatch, CrossrefClient, MatchResult, SourceCollectionResult, _merge_records
 from refaudit.main import run
 from refaudit.parser import extract_authors, parse_reference_metadata
 from refaudit.pubmed import PubMedMatch
 from refaudit.report import make_markdown_bad_only
-from refaudit.scoring import ReferenceRecord, score_candidate
+from refaudit.scoring import CandidateScore, ReferenceRecord, score_candidate
 
 
 def _work(
@@ -751,3 +753,131 @@ def test_cli_markdown_includes_likely_wrong_section(tmp_path, monkeypatch):
     assert "Likely Wrong Citation" in text
     assert "⚠ 要確認" in text
     assert "📄 タイトル" in text
+
+
+def test_collect_candidates_parallel_runs_sources_concurrently(monkeypatch):
+    def fake_crossref(self, input_text):
+        time.sleep(0.1)
+        return SourceCollectionResult(source="crossref", candidates=[])
+
+    def fake_pubmed(self, input_text, title_guess):
+        time.sleep(0.1)
+        return SourceCollectionResult(source="pubmed", candidates=[])
+
+    def fake_arxiv(self, arxiv_id, title_guess, input_authors):
+        time.sleep(0.1)
+        return SourceCollectionResult(source="arxiv", candidates=[], arxiv_id=arxiv_id)
+
+    monkeypatch.setattr(CrossrefClient, "_collect_crossref_source", fake_crossref)
+    monkeypatch.setattr(CrossrefClient, "_collect_pubmed_source", fake_pubmed)
+    monkeypatch.setattr(CrossrefClient, "_collect_arxiv_source", fake_arxiv)
+
+    client = CrossrefClient(pause_sec=0)
+    started = time.perf_counter()
+    raw_candidates, arxiv_id, arxiv_doi, journal_ref, unchecked_sources, source_errors = client._collect_candidates_parallel(
+        "Reference text",
+        "Some title",
+        "2307.06464",
+        ["smith"],
+    )
+    elapsed = time.perf_counter() - started
+
+    assert elapsed < 0.25
+    assert raw_candidates == []
+    assert arxiv_id == "2307.06464"
+    assert arxiv_doi is None
+    assert journal_ref is None
+    assert unchecked_sources == []
+    assert source_errors == {}
+
+
+def test_accepted_result_is_complete_even_with_skipped_sources(monkeypatch):
+    """Strong accept should report complete — skipped sources don't matter."""
+    candidate_record = ReferenceRecord(
+        title="Resolved title",
+        authors=["smith"],
+        year=2024,
+        venue="Journal",
+        doi="10.1234/example",
+        source="crossref",
+    )
+    accepted = CandidateMatch(
+        record=candidate_record,
+        method="bibliographic",
+        score=CandidateScore(
+            total=1.0,
+            decision="accept",
+            signals={},
+            field_states={"title": "ok"},
+            summary="title ok",
+        ),
+    )
+
+    monkeypatch.setattr(
+        CrossrefClient,
+        "_collect_candidates_parallel",
+        lambda self, input_text, title_guess, input_arxiv_id, input_authors: (
+            [(candidate_record, "bibliographic")],
+            None,
+            None,
+            None,
+            ["pubmed"],
+            {"jalc": "TimeoutError"},
+        ),
+    )
+    monkeypatch.setattr(CrossrefClient, "_evaluate_candidates", lambda self, input_record, raw_candidates, mode="verification": [accepted])
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+
+    result = CrossrefClient(pause_sec=0).check_one("Smith J. 2024. Resolved title. Journal.")
+
+    assert result.status == "found"
+    assert result.verification_status == "complete"
+    assert result.unchecked_sources is None
+    assert result.source_errors is None
+
+
+def test_not_found_result_is_partial_when_sources_skipped(monkeypatch):
+    """not_found with skipped sources should report partial."""
+    monkeypatch.setattr(
+        CrossrefClient,
+        "_collect_candidates_parallel",
+        lambda self, input_text, title_guess, input_arxiv_id, input_authors: (
+            [],
+            None,
+            None,
+            None,
+            ["pubmed"],
+            {"jalc": "TimeoutError"},
+        ),
+    )
+    monkeypatch.setattr(CrossrefClient, "_evaluate_candidates", lambda self, input_record, raw_candidates, mode="verification": [])
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+
+    result = CrossrefClient(pause_sec=0).check_one("Unknown reference text 2024.")
+
+    assert result.status == "not_found"
+    assert result.verification_status == "partial"
+    assert result.unchecked_sources == ["pubmed"]
+    assert result.source_errors == {"jalc": "TimeoutError"}
+
+
+def test_report_includes_partial_verification_section():
+    result = MatchResult(
+        input_text="Smith J. 2024. Resolved title. Journal.",
+        doi="10.1234/example",
+        title="Resolved title",
+        found=True,
+        retracted=False,
+        retraction_details=[],
+        status="found",
+        verification_status="partial",
+        unchecked_sources=["pubmed"],
+        source_errors={"jalc": "TimeoutError"},
+        comparison_summary="title ok / authors ok / year ok",
+    )
+
+    markdown = make_markdown_bad_only([result])
+
+    assert "検証未完了" in markdown
+    assert "`pubmed`" in markdown
+    assert "`jalc`=TimeoutError" in markdown
