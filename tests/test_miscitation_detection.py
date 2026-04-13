@@ -461,6 +461,57 @@ def test_pubmed_candidates_do_not_resolve_every_doi(monkeypatch):
     assert calls == ["10.2196/12959"]
 
 
+def test_pubmed_doi_enrichment_reuses_existing_aliases_without_nlm_lookup(monkeypatch):
+    input_ref = (
+        "Smith J. Digital therapeutics paper. Digit Health 2024; 1(1): e1."
+    )
+    hit = PubMedMatch(
+        pmid="1",
+        title="Digital therapeutics paper",
+        doi="10.1000/digital",
+        authors=["Smith J"],
+        year=2024,
+        journal="Digit Health",
+        journal_full="DIGITAL HEALTH",
+        volume="1",
+        issue="1",
+        pages="e1",
+    )
+
+    monkeypatch.setattr(CrossrefClient, "search_bibliographic_items", lambda self, ref, rows=5: [])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_full_citation", lambda self, citation, retmax=5: [hit])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_title_exact", lambda self, title, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.ArxivClient.verify_reference", lambda self, **kwargs: (None, "arxiv-no-query"))
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+    monkeypatch.setattr(
+        CrossrefClient,
+        "_resolve_doi_work",
+        lambda self, doi: (
+            _work(
+                doi,
+                "Digital therapeutics paper",
+                ["Smith"],
+                2024,
+                "DIGITAL HEALTH",
+                "1",
+                "1",
+                "e1",
+            ),
+            "doi-crossref",
+        ),
+    )
+
+    def fail_on_alias_lookup(self, title=None, issns=None):
+        raise AssertionError("NLM alias lookup should be skipped during PubMed DOI enrichment")
+
+    monkeypatch.setattr("refaudit.crossref.NLMCatalogClient.journal_aliases", fail_on_alias_lookup)
+
+    result = CrossrefClient(pause_sec=0).check_one(input_ref)
+
+    assert result.status == "found"
+    assert result.method == "pubmed-full-citation+doi-crossref"
+
+
 def test_crossref_record_uses_nlm_title_fallback_without_issn(monkeypatch):
     aliases_called: list[tuple[str | None, list[str]]] = []
 
@@ -485,6 +536,78 @@ def test_crossref_record_uses_nlm_title_fallback_without_issn(monkeypatch):
 
     assert aliases_called == [("Nature Medicine", [])]
     assert "Nat Med" in record.venue_aliases
+
+
+def test_crossref_candidates_skip_nlm_alias_lookup_when_below_suggest_floor(monkeypatch):
+    input_ref = "Completely different paper. Unknown Journal 2010; 1(1): 1-2."
+    aliases_called: list[tuple[str | None, list[str]]] = []
+
+    monkeypatch.setattr(
+        CrossrefClient,
+        "search_bibliographic_items",
+        lambda self, ref, rows=5: [
+            _work(
+                "10.1000/unrelated",
+                "A totally unrelated title",
+                ["SomeoneElse"],
+                2024,
+                "Nature Medicine",
+                "50",
+                "1",
+                "100-110",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "refaudit.crossref.NLMCatalogClient.journal_aliases",
+        lambda self, title=None, issns=None: aliases_called.append((title, issns or [])) or ["Nat Med"],
+    )
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_full_citation", lambda self, citation, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_title_exact", lambda self, title, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.ArxivClient.verify_reference", lambda self, **kwargs: (None, "arxiv-no-query"))
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+
+    result = CrossrefClient(pause_sec=0).check_one(input_ref)
+
+    assert result.status == "not_found"
+    assert aliases_called == []
+
+
+def test_crossref_candidates_lazily_load_nlm_aliases_for_plausible_match(monkeypatch):
+    input_ref = (
+        "Smith J. Digital therapeutics paper. Digit Health 2024; 1(1): e1."
+    )
+    aliases_called: list[tuple[str | None, list[str]]] = []
+
+    monkeypatch.setattr(
+        CrossrefClient,
+        "search_bibliographic_items",
+        lambda self, ref, rows=5: [
+            _work(
+                "10.1000/digital",
+                "Digital therapeutics paper",
+                ["Smith"],
+                2024,
+                "DIGITAL HEALTH",
+                "1",
+                "1",
+                "e1",
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "refaudit.crossref.NLMCatalogClient.journal_aliases",
+        lambda self, title=None, issns=None: aliases_called.append((title, issns or [])) or ["Digit Health", "Digital health"],
+    )
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_full_citation", lambda self, citation, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.PubMedClient.search_title_exact", lambda self, title, retmax=5: [])
+    monkeypatch.setattr("refaudit.crossref.ArxivClient.verify_reference", lambda self, **kwargs: (None, "arxiv-no-query"))
+    monkeypatch.setattr(CrossrefClient, "is_retracted", lambda self, doi: (False, []))
+
+    result = CrossrefClient(pause_sec=0).check_one(input_ref)
+
+    assert result.status == "found"
+    assert aliases_called == [("DIGITAL HEALTH", [])]
 
 
 def test_jalc_title_fallback_flags_japanese_miscitation(monkeypatch):

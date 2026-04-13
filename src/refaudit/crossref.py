@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 import time
 from typing import Literal
@@ -26,6 +26,7 @@ from .pubmed import PubMedClient, PubMedMatch
 from .scoring import (
     CandidateScore,
     ReferenceRecord,
+    SUGGEST_THRESHOLD,
     normalize_author_name,
     score_candidate,
     year_similarity,
@@ -33,6 +34,7 @@ from .scoring import (
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
+ALIAS_ENRICH_FLOOR = max(0.0, SUGGEST_THRESHOLD - 0.1)
 
 
 @dataclass
@@ -116,6 +118,7 @@ def _merge_records(primary: ReferenceRecord, secondary: ReferenceRecord | None) 
         year=primary.year or secondary.year,
         venue=primary.venue or secondary.venue,
         venue_aliases=venue_aliases,
+        issns=primary.issns or secondary.issns,
         volume=primary.volume or secondary.volume,
         issue=primary.issue or secondary.issue,
         page=primary.page or secondary.page,
@@ -124,6 +127,7 @@ def _merge_records(primary: ReferenceRecord, secondary: ReferenceRecord | None) 
         source=primary.source or secondary.source,
         source_id=primary.source_id or secondary.source_id,
         is_preprint=primary.is_preprint and secondary.is_preprint,
+        aliases_resolved=primary.aliases_resolved or secondary.aliases_resolved,
     )
 
 
@@ -143,8 +147,17 @@ class CrossrefClient:
         self.debug = debug
         self.email = email
         self.budget = budget or NO_BUDGET
+        # This client is intentionally single-threaded. If reference checks are
+        # parallelized later, create one CrossrefClient per worker instead of
+        # sharing these caches and HTTP sessions across threads.
         self._doi_cache: dict[str, tuple[dict | None, str]] = {}
+        self._retraction_cache: dict[str, tuple[bool, list[dict]]] = {}
+        self._bibliographic_cache: dict[tuple[str, int], list[dict]] = {}
         self._nlm = NLMCatalogClient(pause_sec=pause_sec, email=email, budget=self.budget)
+        self._resolver = DOIResolver(pause_sec=pause_sec, email=email, budget=self.budget)
+        self._pubmed = PubMedClient(pause_sec=pause_sec, email=email, budget=self.budget)
+        self._arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0), budget=self.budget)
+        self._jalc = JALCClient(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
 
     def _get(self, url: str, params: dict | None = None):
         if self.budget.expired:
@@ -162,6 +175,9 @@ class CrossrefClient:
         return items[0] if items else None
 
     def search_bibliographic_items(self, ref: str, rows: int = 5) -> list[dict]:
+        cache_key = (ref, rows)
+        if cache_key in self._bibliographic_cache:
+            return self._bibliographic_cache[cache_key]
         params = {
             "query.bibliographic": ref,
             "rows": rows,
@@ -170,16 +186,29 @@ class CrossrefClient:
         payload = self._get(API, params)
         if not payload:
             return []
-        return payload.get("message", {}).get("items", [])
+        items = payload.get("message", {}).get("items", [])
+        self._bibliographic_cache[cache_key] = items
+        return items
 
     def get_work(self, doi: str) -> dict | None:
-        payload = self._get(f"{API}/{urllib.parse.quote(doi)}")
+        payload = self._get(
+            f"{API}/{urllib.parse.quote(doi)}",
+            {
+                "select": (
+                    "DOI,title,issued,published-print,published-online,"
+                    "container-title,ISSN,volume,issue,page,type,author,update-to,relation"
+                )
+            },
+        )
         if not payload:
             return None
         return payload.get("message")
 
     def find_updates_for(self, doi: str) -> list[dict]:
-        payload = self._get(API, {"filter": f"updates:{doi},is-update:true", "rows": 1000})
+        payload = self._get(
+            API,
+            {"filter": f"updates:{doi},is-update:true", "rows": 1000, "select": "DOI,update-to"},
+        )
         if not payload:
             return []
         return payload.get("message", {}).get("items", [])
@@ -187,6 +216,8 @@ class CrossrefClient:
     def is_retracted(self, doi: str | None) -> tuple[bool, list[dict]]:
         if not doi:
             return False, []
+        if doi in self._retraction_cache:
+            return self._retraction_cache[doi]
         notices = self.find_updates_for(doi)
         hits: list[dict] = []
         seen: set[tuple[str | None, str | None]] = set()
@@ -208,7 +239,9 @@ class CrossrefClient:
                         "label": update.get("label"),
                     }
                 )
-        return bool(hits), hits
+        result = (bool(hits), hits)
+        self._retraction_cache[doi] = result
+        return result
 
     def _doi_metadata_to_work(self, doi_meta) -> dict:
         work = {
@@ -232,24 +265,23 @@ class CrossrefClient:
         if doi in self._doi_cache:
             return self._doi_cache[doi]
 
-        resolver = DOIResolver(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
-        ra = resolver.detect_ra(doi)
+        ra = self._resolver.detect_ra(doi)
         if ra == "Crossref":
             result = (self.get_work(doi), "doi-crossref")
             self._doi_cache[doi] = result
             return result
         if ra == "DataCite":
-            doi_meta = resolver.resolve_via_datacite(doi)
+            doi_meta = self._resolver.resolve_via_datacite(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-datacite")
             self._doi_cache[doi] = result
             return result
         if ra == "JaLC":
-            doi_meta = resolver.resolve_via_content_negotiation(doi)
+            doi_meta = self._resolver.resolve_via_content_negotiation(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-jalc")
             self._doi_cache[doi] = result
             return result
         if ra:
-            doi_meta = resolver.resolve_via_content_negotiation(doi)
+            doi_meta = self._resolver.resolve_via_content_negotiation(doi)
             result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), f"doi-{ra.lower()}")
             self._doi_cache[doi] = result
             return result
@@ -259,22 +291,30 @@ class CrossrefClient:
             result = (work, "doi-crossref")
             self._doi_cache[doi] = result
             return result
-        doi_meta = resolver.resolve_via_content_negotiation(doi)
+        doi_meta = self._resolver.resolve_via_content_negotiation(doi)
         result = ((self._doi_metadata_to_work(doi_meta) if doi_meta else None), "doi-content-negotiation")
         self._doi_cache[doi] = result
         return result
 
-    def _work_to_record(self, work: dict, source: str, source_id: str | None = None) -> ReferenceRecord:
+    def _work_to_record(
+        self,
+        work: dict,
+        source: str,
+        source_id: str | None = None,
+        *,
+        resolve_aliases: bool = True,
+    ) -> ReferenceRecord:
         page = work.get("page")
         venue = (work.get("container-title") or [None])[0]
         issns = work.get("ISSN") or []
-        venue_aliases = self._nlm.journal_aliases(title=venue, issns=issns)
+        venue_aliases = self._nlm.journal_aliases(title=venue, issns=issns) if resolve_aliases else []
         return ReferenceRecord(
             title=(work.get("title") or [None])[0],
             authors=_extract_crossref_authors(work),
             year=_published_year(work),
             venue=venue,
             venue_aliases=venue_aliases,
+            issns=[issn for issn in issns if issn],
             volume=work.get("volume"),
             issue=work.get("issue"),
             page=page,
@@ -283,6 +323,7 @@ class CrossrefClient:
             source=source,
             source_id=source_id,
             is_preprint=_is_preprint_work(work),
+            aliases_resolved=resolve_aliases,
         )
 
     def _pubmed_to_record(self, hit: PubMedMatch) -> ReferenceRecord:
@@ -300,6 +341,7 @@ class CrossrefClient:
             doi=hit.doi,
             source="pubmed",
             source_id=hit.pmid,
+            aliases_resolved=True,
         )
 
     def _arxiv_to_record(self, match: ArxivMatch) -> ReferenceRecord:
@@ -321,7 +363,29 @@ class CrossrefClient:
             source="arxiv",
             source_id=match.arxiv_id,
             is_preprint=True,
+            aliases_resolved=True,
         )
+
+    def _record_with_aliases(self, record: ReferenceRecord) -> ReferenceRecord:
+        if record.aliases_resolved:
+            return record
+        if not record.venue and not record.issns:
+            return replace(record, aliases_resolved=True)
+        aliases = self._nlm.journal_aliases(title=record.venue, issns=record.issns)
+        return replace(record, venue_aliases=aliases, aliases_resolved=True)
+
+    def _should_enrich_aliases(
+        self,
+        input_record: ReferenceRecord,
+        candidate: CandidateMatch,
+    ) -> bool:
+        if not input_record.venue or not candidate.record.venue:
+            return False
+        if candidate.record.aliases_resolved:
+            return False
+        if candidate.score.total < ALIAS_ENRICH_FLOOR:
+            return False
+        return candidate.score.signals.get("venue_similarity", 0.0) < 1.0
 
     def _candidate_payload(self, candidate: CandidateMatch) -> dict:
         record = candidate.record
@@ -414,7 +478,12 @@ class CrossrefClient:
 
         enriched_record = _merge_records(
             candidate.record,
-            self._work_to_record(work, source="pubmed-doi", source_id=candidate.record.source_id),
+            self._work_to_record(
+                work,
+                source="pubmed-doi",
+                source_id=candidate.record.source_id,
+                resolve_aliases=False,
+            ),
         )
         enriched_score = score_candidate(
             input_record,
@@ -430,20 +499,22 @@ class CrossrefClient:
 
     def _collect_crossref_candidates(self, input_text: str) -> list[tuple[ReferenceRecord, str]]:
         items = self.search_bibliographic_items(input_text, rows=5)
-        return [(self._work_to_record(item, source="crossref"), "bibliographic") for item in items]
+        return [
+            (self._work_to_record(item, source="crossref", resolve_aliases=False), "bibliographic")
+            for item in items
+        ]
 
     def _collect_pubmed_candidates(self, input_text: str, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
-        pubmed = PubMedClient(email=self.email, budget=self.budget)
         seen: set[tuple[str | None, str | None]] = set()
         collected: list[tuple[ReferenceRecord, str]] = []
-        for hit in pubmed.search_full_citation(input_text):
+        for hit in self._pubmed.search_full_citation(input_text):
             record = self._pubmed_to_record(hit)
             key = (record.doi, record.title)
             if key not in seen:
                 seen.add(key)
                 collected.append((record, "pubmed-full-citation"))
         if title_guess:
-            for hit in pubmed.search_title_exact(title_guess):
+            for hit in self._pubmed.search_title_exact(title_guess):
                 record = self._pubmed_to_record(hit)
                 key = (record.doi, record.title)
                 if key not in seen:
@@ -460,14 +531,13 @@ class CrossrefClient:
         if not arxiv_id and not title_guess:
             return [], None, None, None
 
-        arxiv = ArxivClient(pause_sec=max(self.pause_sec, 3.0), budget=self.budget)
         collected: list[tuple[ReferenceRecord, str]] = []
         match: ArxivMatch | None = None
         method = "arxiv-no-query"
         if arxiv_id:
-            match, method = arxiv.verify_reference(arxiv_id=arxiv_id)
+            match, method = self._arxiv.verify_reference(arxiv_id=arxiv_id)
         elif title_guess:
-            match, method = arxiv.verify_reference(title=title_guess, authors=input_authors)
+            match, method = self._arxiv.verify_reference(title=title_guess, authors=input_authors)
 
         if not match:
             return [], arxiv_id, None, None
@@ -477,27 +547,36 @@ class CrossrefClient:
         if match.doi:
             work, doi_method = self._resolve_doi_work(match.doi)
             if work:
-                collected.insert(0, (self._work_to_record(work, source="arxiv-published"), doi_method))
+                collected.insert(
+                    0,
+                    (self._work_to_record(work, source="arxiv-published", resolve_aliases=False), doi_method),
+                )
         elif match.title:
             query = f"{match.title} {' '.join(input_authors[:2])}".strip()
             for item in self.search_bibliographic_items(query, rows=3):
-                collected.append((self._work_to_record(item, source="arxiv-crossref"), "arxiv-crossref"))
+                collected.append(
+                    (self._work_to_record(item, source="arxiv-crossref", resolve_aliases=False), "arxiv-crossref")
+                )
         return collected, match.arxiv_id, match.doi, match.journal_ref
 
     def _collect_jalc_candidates(self, title_guess: str | None) -> list[tuple[ReferenceRecord, str]]:
         if not title_guess or not contains_japanese_text(title_guess):
             return []
 
-        jalc = JALCClient(pause_sec=self.pause_sec, email=self.email, budget=self.budget)
         collected: list[tuple[ReferenceRecord, str]] = []
-        for hit in jalc.search_title(title_guess, rows=5):
+        for hit in self._jalc.search_title(title_guess, rows=5):
             doi = hit.get("doi")
             title = hit.get("title")
             if not doi:
                 continue
             work, doi_method = self._resolve_doi_work(doi)
             if work:
-                collected.append((self._work_to_record(work, source="jalc", source_id=doi), f"jalc-title+{doi_method}"))
+                collected.append(
+                    (
+                        self._work_to_record(work, source="jalc", source_id=doi, resolve_aliases=False),
+                        f"jalc-title+{doi_method}",
+                    )
+                )
                 continue
             collected.append(
                 (
@@ -506,6 +585,7 @@ class CrossrefClient:
                         doi=doi,
                         source="jalc-search",
                         source_id=doi,
+                        aliases_resolved=True,
                     ),
                     "jalc-title",
                 )
@@ -535,13 +615,25 @@ class CrossrefClient:
             )
             for record, method in deduped
         ]
+        if input_record.venue:
+            alias_enriched: list[CandidateMatch] = []
+            for candidate in evaluated:
+                if self._should_enrich_aliases(input_record, candidate):
+                    record = self._record_with_aliases(candidate.record)
+                    candidate = CandidateMatch(
+                        record=record,
+                        method=candidate.method,
+                        score=score_candidate(input_record, record, mode=mode, strict=self.strict),
+                    )
+                alias_enriched.append(candidate)
+            evaluated = alias_enriched
         if mode == "verification":
-            enriched: list[CandidateMatch] = []
+            verified_enriched: list[CandidateMatch] = []
             for candidate in evaluated:
                 if candidate.score.decision == "accept":
                     candidate = self._enrich_pubmed_candidate(input_record, candidate, mode)
-                enriched.append(candidate)
-            evaluated = enriched
+                verified_enriched.append(candidate)
+            evaluated = verified_enriched
         return self._sort_candidates(evaluated)
 
     def check_one(self, input_text: str) -> MatchResult:
@@ -585,8 +677,14 @@ class CrossrefClient:
                     ],
                 )
 
-            record = self._work_to_record(work, source="doi", source_id=input_doi)
+            record = self._work_to_record(work, source="doi", source_id=input_doi, resolve_aliases=False)
             score = score_candidate(input_record, record, mode="verification", strict=self.strict)
+            if self._should_enrich_aliases(
+                input_record,
+                CandidateMatch(record=record, method=method, score=score),
+            ):
+                record = self._record_with_aliases(record)
+                score = score_candidate(input_record, record, mode="verification", strict=self.strict)
             note = None
             if input_record.year is not None and record.year is not None and year_similarity(input_record.year, record.year) == 0.7:
                 note = "year_warning"

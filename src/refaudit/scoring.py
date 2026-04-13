@@ -24,6 +24,7 @@ class ReferenceRecord:
     year: int | None = None
     venue: str | None = None
     venue_aliases: list[str] = field(default_factory=list)
+    issns: list[str] = field(default_factory=list)
     volume: str | None = None
     issue: str | None = None
     page: str | None = None
@@ -32,6 +33,7 @@ class ReferenceRecord:
     source: str | None = None
     source_id: str | None = None
     is_preprint: bool = False
+    aliases_resolved: bool = False
 
 
 @dataclass
