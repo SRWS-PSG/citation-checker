@@ -211,15 +211,7 @@ class CrossrefClient:
         return items
 
     def get_work(self, doi: str) -> dict | None:
-        payload = self._get(
-            f"{API}/{urllib.parse.quote(doi)}",
-            {
-                "select": (
-                    "DOI,title,issued,published-print,published-online,"
-                    "container-title,ISSN,volume,issue,page,type,author,update-to,relation"
-                )
-            },
-        )
+        payload = self._get(f"{API}/{urllib.parse.quote(doi)}")
         if not payload:
             return None
         return payload.get("message")
