@@ -4,11 +4,14 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime
 from threading import Lock
+import logging
 import time
 from typing import Literal
 import urllib.parse
 
 import requests
+
+logger = logging.getLogger(__name__)
 
 from .arxiv import ArxivClient, ArxivMatch
 from .budget import NO_BUDGET, TimeBudget
@@ -177,7 +180,7 @@ class CrossrefClient:
         message = str(exc).strip()
         return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
 
-    def _get(self, url: str, params: dict | None = None):
+    def _get(self, url: str, params: dict | None = None, *, source: str | None = None):
         if self.budget.expired:
             return None
         try:
@@ -185,7 +188,18 @@ class CrossrefClient:
             response.raise_for_status()
             time.sleep(self.pause_sec)
             return response.json()
-        except requests.RequestException:
+        except requests.HTTPError as exc:
+            resp = exc.response
+            status = resp.status_code if resp is not None else "?"
+            body = (resp.text[:200] if resp is not None else "").replace("\n", " ").strip()
+            logger.warning("Crossref HTTP %s for %s | %s", status, url, body)
+            # 4xx is almost always a client/code bug — surface it in diagnostics
+            # so the next regression of this kind is visible to the user.
+            if source and isinstance(status, int) and 400 <= status < 500:
+                self.budget.mark_source_error(source, f"HTTP {status}: {body[:140]}")
+            return None
+        except requests.RequestException as exc:
+            logger.info("Crossref request failed for %s: %s", url, exc)
             return None
 
     def search_bibliographic(self, ref: str) -> dict | None:
@@ -202,7 +216,7 @@ class CrossrefClient:
             "rows": rows,
             "select": "DOI,title,issued,published-print,published-online,container-title,ISSN,volume,issue,page,type,author",
         }
-        payload = self._get(API, params)
+        payload = self._get(API, params, source="crossref-bibliographic")
         if not payload:
             return []
         items = payload.get("message", {}).get("items", [])
@@ -211,15 +225,10 @@ class CrossrefClient:
         return items
 
     def get_work(self, doi: str) -> dict | None:
-        payload = self._get(
-            f"{API}/{urllib.parse.quote(doi)}",
-            {
-                "select": (
-                    "DOI,title,issued,published-print,published-online,"
-                    "container-title,ISSN,volume,issue,page,type,author,update-to,relation"
-                )
-            },
-        )
+        # Crossref's /works/{doi} endpoint does not support the `select` parameter
+        # (returns HTTP 400 "This route does not support select"), unlike the
+        # /works search endpoint. Always request the full work record.
+        payload = self._get(f"{API}/{urllib.parse.quote(doi)}", source="crossref-doi")
         if not payload:
             return None
         return payload.get("message")
@@ -228,6 +237,7 @@ class CrossrefClient:
         payload = self._get(
             API,
             {"filter": f"updates:{doi},is-update:true", "rows": 1000, "select": "DOI,update-to"},
+            source="crossref-updates",
         )
         if not payload:
             return []

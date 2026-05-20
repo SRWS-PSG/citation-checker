@@ -14,12 +14,15 @@ The fallback chain is:
 """
 from __future__ import annotations
 
+import logging
 import time
 from dataclasses import dataclass
 
 import requests
 from .budget import NO_BUDGET, TimeBudget
 from .etiquette import build_user_agent
+
+logger = logging.getLogger(__name__)
 
 DOIRA_API = "https://doi.org/doiRA"
 DATACITE_API = "https://api.datacite.org/dois"
@@ -57,7 +60,14 @@ class DOIResolver:
         self.pause_sec = pause_sec
         self.budget = budget or NO_BUDGET
 
-    def _get_json(self, url: str, params: dict | None = None, headers: dict | None = None) -> dict | None:
+    def _get_json(
+        self,
+        url: str,
+        params: dict | None = None,
+        headers: dict | None = None,
+        *,
+        source: str | None = None,
+    ) -> dict | None:
         if self.budget.expired:
             return None
         try:
@@ -68,7 +78,16 @@ class DOIResolver:
             r.raise_for_status()
             time.sleep(self.pause_sec)
             return r.json()
-        except requests.RequestException:
+        except requests.HTTPError as exc:
+            resp = exc.response
+            status = resp.status_code if resp is not None else "?"
+            body = (resp.text[:200] if resp is not None else "").replace("\n", " ").strip()
+            logger.warning("DOI resolver HTTP %s for %s | %s", status, url, body)
+            if source and isinstance(status, int) and 400 <= status < 500:
+                self.budget.mark_source_error(source, f"HTTP {status}: {body[:140]}")
+            return None
+        except requests.RequestException as exc:
+            logger.info("DOI resolver request failed for %s: %s", url, exc)
             return None
     
     def detect_ra(self, doi: str) -> str | None:
@@ -77,69 +96,54 @@ class DOIResolver:
 
         Returns the RA name (e.g., 'Crossref', 'DataCite', 'JaLC') or None if detection fails.
         """
-        if self.budget.expired:
-            return None
-        url = f"{DOIRA_API}/{doi}"
-        try:
-            r = self.session.get(url, timeout=self.budget.http_timeout(10.0))
-            r.raise_for_status()
-            time.sleep(self.pause_sec)
-            data = r.json()
-            if isinstance(data, list) and len(data) > 0:
-                return data[0].get("RA")
-            return None
-        except requests.RequestException:
-            return None
-    
+        data = self._get_json(f"{DOIRA_API}/{doi}", source="doi-ra")
+        if isinstance(data, list) and len(data) > 0:
+            return data[0].get("RA")
+        return None
+
     def resolve_via_content_negotiation(self, doi: str) -> DOIMetadata | None:
         """
         Resolve DOI metadata via doi.org content negotiation.
-        
+
         This works for ALL Registration Agencies and returns CSL-JSON format.
         """
-        url = f"https://doi.org/{doi}"
-        headers = {"Accept": "application/vnd.citationstyles.csl+json;q=1.0"}
-        
-        if self.budget.expired:
+        data = self._get_json(
+            f"https://doi.org/{doi}",
+            headers={"Accept": "application/vnd.citationstyles.csl+json;q=1.0"},
+            source="doi-content-negotiation",
+        )
+        if not data:
             return None
-        try:
-            r = self.session.get(url, headers=headers, timeout=self.budget.http_timeout(10.0), allow_redirects=True)
-            r.raise_for_status()
-            time.sleep(self.pause_sec)
-            data = r.json()
-            
-            return self._parse_csl_json(data, doi, method="content-negotiation")
-        except requests.RequestException:
-            return None
+        return self._parse_csl_json(data, doi, method="content-negotiation")
     
     def resolve_via_crossref(self, doi: str) -> DOIMetadata | None:
         """Resolve DOI metadata via Crossref API."""
         import urllib.parse
         url = f"https://api.crossref.org/works/{urllib.parse.quote(doi)}"
-        
-        data = self._get_json(url)
+
+        data = self._get_json(url, source="doi-crossref")
         if not data:
             return None
-        
+
         work = data.get("message")
         if not work:
             return None
-        
+
         return self._parse_crossref_work(work, doi)
-    
+
     def resolve_via_datacite(self, doi: str) -> DOIMetadata | None:
         """Resolve DOI metadata via DataCite API."""
         import urllib.parse
         url = f"{DATACITE_API}/{urllib.parse.quote(doi)}"
-        
-        data = self._get_json(url)
+
+        data = self._get_json(url, source="doi-datacite")
         if not data:
             return None
-        
+
         attrs = data.get("data", {}).get("attributes", {})
         if not attrs:
             return None
-        
+
         return self._parse_datacite_attrs(attrs, doi)
     
     def resolve(self, doi: str) -> DOIMetadata | None:
