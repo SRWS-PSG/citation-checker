@@ -2,7 +2,10 @@ const STORAGE_KEY = "citeguard.contactEmail";
 
 const emailInput = document.getElementById("email");
 const rememberEmail = document.getElementById("remember-email");
-const referencesInput = document.getElementById("references");
+const rawInput = document.getElementById("raw");
+const referencesEditor = document.getElementById("references");
+const cleanButton = document.getElementById("clean");
+const recleanButton = document.getElementById("reclean");
 const runButton = document.getElementById("run");
 const downloadButton = document.getElementById("download");
 const statusText = document.getElementById("status");
@@ -69,125 +72,126 @@ function pickFieldDiffs(result) {
   return null;
 }
 
-/* ---------- BibTeX detection & parsing ---------- */
+/* ---------- Reconstruction (server-side, mirrors CLI split_references) ---------- */
 
-const BIBTEX_ENTRY_RE =
-  /@\s*(?:article|book|inproceedings|incollection|conference|phdthesis|mastersthesis|techreport|misc|unpublished|proceedings|inbook|manual|booklet)\s*\{/i;
+async function cleanReferences(text) {
+  const response = await fetch("/api/clean", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ text }),
+  });
 
-function detectBibtex(text) {
-  return BIBTEX_ENTRY_RE.test(text || "");
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+
+  if (!response.ok || !payload?.ok) {
+    const message = payload?.error || (response.status === 504 ? "timeout" : "request_failed");
+    throw new Error(message);
+  }
+
+  return Array.isArray(payload.refs) ? payload.refs : [];
 }
 
-/**
- * Minimal BibTeX parser — splits text into entry blocks and extracts fields.
- * Handles nested braces in field values.
- */
-function parseBibtexEntries(text) {
-  const entries = [];
-  const entryRe =
-    /@\s*(article|book|inproceedings|incollection|conference|phdthesis|mastersthesis|techreport|misc|unpublished|proceedings|inbook|manual|booklet)\s*\{/gi;
+/* ---------- Per-reference editor (one row = one reference) ---------- */
 
-  let match;
-  while ((match = entryRe.exec(text)) !== null) {
-    const startBody = match.index + match[0].length;
-    // Walk forward, counting braces to find the matching close
-    let depth = 1;
-    let pos = startBody;
-    while (pos < text.length && depth > 0) {
-      if (text[pos] === "{") depth++;
-      else if (text[pos] === "}") depth--;
-      pos++;
-    }
-    const body = text.slice(startBody, pos - 1);
-    const fields = {};
+const REF_EMPTY_HTML =
+  '<p class="ref-empty">「整形 →」を押すと、再構成された文献リストがここに表示されます。原文と見比べて修正してください。</p>';
 
-    // Extract key=value pairs (value delimited by {} or "")
-    const fieldRe = /(\w+)\s*=\s*/g;
-    let fm;
-    while ((fm = fieldRe.exec(body)) !== null) {
-      const key = fm[1].toLowerCase();
-      let valStart = fm.index + fm[0].length;
-      let value = "";
-
-      if (body[valStart] === "{") {
-        let d = 1;
-        let p = valStart + 1;
-        while (p < body.length && d > 0) {
-          if (body[p] === "{") d++;
-          else if (body[p] === "}") d--;
-          p++;
-        }
-        value = body.slice(valStart + 1, p - 1);
-      } else if (body[valStart] === '"') {
-        const end = body.indexOf('"', valStart + 1);
-        value = end > 0 ? body.slice(valStart + 1, end) : "";
-      } else {
-        // Bare value (e.g., month = feb)
-        const rest = body.slice(valStart);
-        const comma = rest.search(/[,}]/);
-        value = (comma >= 0 ? rest.slice(0, comma) : rest).trim();
-      }
-      fields[key] = value.replace(/[{}]/g, "").trim();
-    }
-    entries.push(fields);
-  }
-  return entries;
+function autoGrow(input) {
+  input.style.height = "auto";
+  input.style.height = `${input.scrollHeight}px`;
 }
 
-function bibtexEntryToText(entry) {
-  const parts = [];
+function createRefRow(value) {
+  const row = document.createElement("div");
+  row.className = "ref-row";
 
-  if (entry.author) {
-    const names = entry.author.split(/\s+and\s+/i).map((a) => {
-      const trimmed = a.trim();
-      return trimmed.includes(",") ? trimmed.split(",")[0].trim() : trimmed.split(/\s+/).pop();
-    });
-    parts.push(names.join(", "));
-  }
-  if (entry.year) parts.push(entry.year);
-  if (entry.title) parts.push(entry.title);
-  if (entry.journal) parts.push(entry.journal);
-  else if (entry.booktitle) parts.push(entry.booktitle);
-  if (entry.doi) parts.push(`DOI: ${entry.doi}`);
-  if (entry.eprint && (entry.archiveprefix || "").toLowerCase() === "arxiv") {
-    parts.push(`arXiv:${entry.eprint}`);
-  }
-  return parts.join(". ");
+  const num = document.createElement("span");
+  num.className = "ref-num";
+  num.setAttribute("aria-hidden", "true");
+
+  const input = document.createElement("textarea");
+  input.className = "ref-input";
+  input.rows = 1;
+  input.value = value;
+  input.addEventListener("input", () => autoGrow(input));
+  input.addEventListener("keydown", onRefKeydown);
+
+  row.append(num, input);
+  return row;
 }
 
-function splitBibtexReferences(text) {
-  return parseBibtexEntries(text)
-    .map(bibtexEntryToText)
+function getRefRows() {
+  return Array.from(referencesEditor.querySelectorAll(".ref-input"));
+}
+
+/* Each row holds one reference; flatten any stray newlines and drop empties. */
+function getRefValues() {
+  return getRefRows()
+    .map((input) => input.value.replace(/\s*\n\s*/g, " ").trim())
     .filter(Boolean);
 }
 
-/* ---------- Plain-text splitting ---------- */
-
-function splitPlainReferences(text) {
-  const skipLabels = new Set([
-    "article",
-    "pubmed",
-    "pubmed central",
-    "google scholar",
-    "cas",
-    "references",
-  ]);
-
-  return (text || "")
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => !skipLabels.has(line.toLowerCase()))
-    .map((line) => line.replace(/^\s*(\[\d+\]|\d+[\.)]\s*)/, "").trim());
+function setRefValues(refs) {
+  referencesEditor.innerHTML = "";
+  if (!refs.length) {
+    referencesEditor.innerHTML = REF_EMPTY_HTML;
+    return;
+  }
+  for (const ref of refs) {
+    referencesEditor.appendChild(createRefRow(ref));
+  }
+  // scrollHeight needs layout, so size the rows after they are attached.
+  requestAnimationFrame(() => getRefRows().forEach(autoGrow));
 }
 
-/* ---------- Unified entry point ---------- */
+function setEditorEnabled(enabled) {
+  referencesEditor.classList.toggle("is-disabled", !enabled);
+  getRefRows().forEach((input) => {
+    input.readOnly = !enabled;
+  });
+}
 
-function splitReferences(text) {
-  if (detectBibtex(text)) {
-    return splitBibtexReferences(text);
+// Enter splits a row at the caret; Backspace at the line start merges into the
+// previous row. Composition guards keep Japanese IME confirmation from splitting.
+function onRefKeydown(event) {
+  const input = event.target;
+  const row = input.closest(".ref-row");
+
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing && event.keyCode !== 229) {
+    event.preventDefault();
+    const before = input.value.slice(0, input.selectionStart);
+    const after = input.value.slice(input.selectionEnd);
+    input.value = before;
+    autoGrow(input);
+
+    const newRow = createRefRow(after);
+    row.after(newRow);
+    const newInput = newRow.querySelector(".ref-input");
+    autoGrow(newInput);
+    newInput.focus();
+    newInput.setSelectionRange(0, 0);
+    return;
   }
-  return splitPlainReferences(text);
+
+  if (event.key === "Backspace" && input.selectionStart === 0 && input.selectionEnd === 0) {
+    const prevRow = row.previousElementSibling;
+    if (!prevRow || !prevRow.classList.contains("ref-row")) return;
+    event.preventDefault();
+    const prevInput = prevRow.querySelector(".ref-input");
+    const joinAt = prevInput.value.length;
+    prevInput.value += input.value;
+    row.remove();
+    autoGrow(prevInput);
+    prevInput.focus();
+    prevInput.setSelectionRange(joinAt, joinAt);
+  }
 }
 
 function loadStoredEmail() {
@@ -533,8 +537,52 @@ async function checkReference(ref, email) {
   return { result: payload.result, diagnostics: payload.diagnostics || null };
 }
 
+function setStageReady(ready) {
+  setEditorEnabled(ready);
+  recleanButton.disabled = !ready;
+  runButton.disabled = !ready;
+}
+
+async function runClean({ reclean = false } = {}) {
+  const text = rawInput.value;
+  if (!text.trim()) {
+    statusText.textContent = "整形する参考文献テキストを入力してください。";
+    rawInput.focus();
+    return;
+  }
+  if (reclean && getRefValues().length) {
+    const ok = window.confirm("整形結果を原文から作り直します。右側の編集内容は破棄されます。よろしいですか？");
+    if (!ok) return;
+  }
+
+  cleanButton.disabled = true;
+  recleanButton.disabled = true;
+  runButton.disabled = true;
+  statusText.textContent = "整形中...";
+
+  try {
+    const refs = await cleanReferences(text);
+    setRefValues(refs);
+    if (refs.length) {
+      setStageReady(true);
+      statusText.textContent = `整形しました（${refs.length}件）。原文と見比べて確認・修正してから「チェック開始」を押してください。`;
+      const firstRow = getRefRows()[0];
+      if (firstRow) firstRow.focus();
+    } else {
+      runButton.disabled = true;
+      recleanButton.disabled = false;
+      statusText.textContent = "整形できる文献が見つかりませんでした。原文をご確認ください。";
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "request_failed";
+    statusText.textContent = `整形に失敗しました: ${message}`;
+  } finally {
+    cleanButton.disabled = false;
+  }
+}
+
 async function runAudit() {
-  const refs = splitReferences(referencesInput.value);
+  const refs = getRefValues();
   const email = emailInput.value.trim();
 
   if (!email) {
@@ -544,14 +592,18 @@ async function runAudit() {
   }
 
   if (!refs.length) {
-    statusText.textContent = "参考文献テキストを入力してください。";
-    referencesInput.focus();
+    statusText.textContent = "整形結果が空です。先に「整形 →」を押すか、文献を入力してください。";
+    const firstRow = getRefRows()[0];
+    if (firstRow) firstRow.focus();
     return;
   }
 
   syncStoredEmail();
   runButton.disabled = true;
+  recleanButton.disabled = true;
+  cleanButton.disabled = true;
   downloadButton.disabled = true;
+  setEditorEnabled(false);
   latestResults = [];
   latestDiagnostics = [];
   renderResults(latestResults);
@@ -586,11 +638,14 @@ async function runAudit() {
     downloadButton.disabled = false;
   } finally {
     runButton.disabled = false;
+    recleanButton.disabled = false;
+    cleanButton.disabled = false;
+    setEditorEnabled(true);
   }
 }
 
 function downloadMarkdown() {
-  const markdown = buildMarkdown(latestResults, referencesInput.value, latestDiagnostics);
+  const markdown = buildMarkdown(latestResults, getRefValues().join("\n"), latestDiagnostics);
   const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
@@ -606,6 +661,8 @@ emailInput.addEventListener("input", () => {
     syncStoredEmail();
   }
 });
+cleanButton.addEventListener("click", () => runClean());
+recleanButton.addEventListener("click", () => runClean({ reclean: true }));
 runButton.addEventListener("click", runAudit);
 downloadButton.addEventListener("click", downloadMarkdown);
 

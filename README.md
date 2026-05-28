@@ -197,11 +197,15 @@ citeguard --input-file references.bib
 
 ## Web UI / API
 
-`public/` に静的フロントエンド、`api/check.py` に Vercel Python Serverless Function を含みます。ブラウザから1件ずつ参考文献を貼り付けて確認できます。
+`public/` に静的フロントエンド、`api/` に Vercel Python Serverless Function（`clean.py` / `check.py`）を含みます。ブラウザ上は CLI と同じ「**整形 → 人による確認・修正 → API照合**」の3段フローです。
+
+1. **① 整形**: 左の入力欄に参考文献テキストを貼り付けて「整形」を押すと、`POST /api/clean` が CLI と同じ `split_references()`（行番号付きPDFのクリーニング・BibTeX 自動検出を含む）で **1行＝1件** に再構成します。このステップは外部APIへの問い合わせもメールアドレスも不要です。
+2. **② 確認・修正**: 整形結果が右の編集欄に表示されます。左の原文と見比べ、文献の区切り（改行）や内容を人の目で確認・修正します。
+3. **③ チェック**: 「チェック開始」で、編集欄の各行を `POST /api/check` に1件ずつ照合します。
 
 ### Web でのメールアドレスの扱い
 
-- チェック実行時にメールアドレス入力が必須です
+- 整形（`/api/clean`）はメールアドレス不要です。チェック（`/api/check`）実行時のみ必須です
 - 用途は Crossref / PubMed の etiquette 用 `User-Agent` / `email` パラメータのみです
 - サーバー側では保存しません
 - ブラウザにも既定では保存しません
@@ -209,7 +213,18 @@ citeguard --input-file references.bib
 
 ### API リクエスト仕様
 
-`POST /api/check`
+`POST /api/clean`（整形・再構成。外部API呼び出しなし）
+
+```json
+{
+  "text": "pasted reference text"
+}
+```
+
+- `text` は必須、50000文字以内
+- 応答は `{"ok": true, "refs": ["...", "..."]}` 形式で、`refs` は再構成された1件1要素のリストです
+
+`POST /api/check`（照合）
 
 ```json
 {

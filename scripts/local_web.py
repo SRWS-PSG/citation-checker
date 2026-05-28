@@ -14,6 +14,12 @@ for item in (ROOT, SRC):
         sys.path.insert(0, str(item))
 
 from api.check import build_json_response, handle_check
+from api.clean import handle_clean
+
+ROUTES = {
+    "/api/check": handle_check,
+    "/api/clean": handle_clean,
+}
 
 
 class LocalHandler(SimpleHTTPRequestHandler):
@@ -21,7 +27,8 @@ class LocalHandler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(PUBLIC), **kwargs)
 
     def do_POST(self) -> None:
-        if self.path != "/api/check":
+        route = ROUTES.get(self.path)
+        if route is None:
             self.send_error(HTTPStatus.NOT_FOUND, "Not found")
             return
 
@@ -38,7 +45,7 @@ class LocalHandler(SimpleHTTPRequestHandler):
             return
 
         try:
-            status, response = handle_check(payload)
+            status, response = route(payload)
             self._write_json(status, response)
         except ValueError as exc:
             self._write_json(400, {"ok": False, "error": str(exc)})

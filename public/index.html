@@ -11,7 +11,7 @@
     <section class="hero">
       <p class="eyebrow">Citation Checker</p>
       <h1>CiteGuard Web</h1>
-      <p class="lede">参考文献テキストを貼り付けて、未発見・誤引用候補・撤回・年注意・ウェブサイト参照をブラウザから確認できます。</p>
+      <p class="lede">参考文献テキストを貼り付けて整形し、ご自身で内容を確認・修正してから、未発見・誤引用候補・撤回・年注意・ウェブサイト参照をAPIで確認できます。</p>
       <div class="notice">
         <h3>データの取り扱い</h3>
         <ul>
@@ -19,11 +19,11 @@
           <li>メールアドレスは、各学術データベースの利用規約で求められる連絡先の通知にのみ使用します。CiteGuard 側では保存しません。「このブラウザにメールアドレスを保存」を ON にした場合のみ、お使いのブラウザ内に保持されます。</li>
           <li>ソースコードは <a href="https://github.com/SRWS-PSG/citation-checker" target="_blank" rel="noopener">GitHub</a> で公開しています。</li>
         </ul>
-        <h3>ご注意</h3>
+        <h3>使い方</h3>
         <ul>
-          <li>チェック結果はあくまで目安です。雑誌名の略記や表記ゆれ、電子公開のみの論文の日付、ページ番号の有無などにより、正しい引用でも「誤引用候補」と表示されることがあります。最終的にはご自身の目でご確認ください。</li>
-          <li>プレーンテキストの場合は <strong>1行につき1件</strong> で入力してください。途中で改行が入ると別の文献として扱われ、正しくチェックできません。</li>
-          <li><strong>BibTeX 形式</strong>（<code>@article{...}</code> 等）もそのまま貼り付けできます。自動検出されます。</li>
+          <li><strong>① 整形</strong>：左に参考文献テキストを貼り付けて「整形」を押すと、行番号付きPDFのコピペ・フッター・折り返しなどを自動で除去し、<strong>1行＝1件</strong>に再構成します（このステップはAPI問い合わせもメールアドレスも不要です）。<strong>BibTeX 形式</strong>（<code>@article{...}</code> 等）も自動検出します。</li>
+          <li><strong>② 確認・修正</strong>：整形結果が右に表示されます。左の原文と見比べ、文献の区切り（改行）や内容に誤りがあればご自身で直してください。<strong>1行＝1件</strong>が崩れていると正しくチェックできません。</li>
+          <li><strong>③ チェック</strong>：「チェック開始」で各 API に照合します。結果はあくまで目安です。雑誌名の略記や表記ゆれ、電子公開のみの論文の日付、ページ番号の有無などにより、正しい引用でも「誤引用候補」と表示されることがあります。最終的にはご自身の目でご確認ください。</li>
         </ul>
       </div>
     </section>
@@ -39,13 +39,36 @@
         <span>このブラウザにメールアドレスを保存</span>
       </label>
 
-      <label class="field">
-        <span>参考文献テキスト</span>
-        <textarea id="references" rows="14" placeholder="1行に1書誌を貼り付け、または BibTeX をそのまま貼り付けてください"></textarea>
-      </label>
+      <div class="stage-grid">
+        <div class="stage">
+          <div class="stage-head">
+            <span class="stage-step">① 原文</span>
+          </div>
+          <label class="field">
+            <span class="sr-only">参考文献テキスト（原文）</span>
+            <textarea id="raw" rows="16" placeholder="参考文献テキストをそのまま貼り付けてください（行番号付きPDFのコピペ・BibTeX も可）"></textarea>
+          </label>
+          <div class="actions">
+            <button id="clean" type="button">整形 →</button>
+          </div>
+        </div>
 
-      <div class="actions">
-        <button id="run" type="button">チェック開始</button>
+        <div class="stage">
+          <div class="stage-head">
+            <span class="stage-step">② 整形結果（1行＝1件・編集可）</span>
+          </div>
+          <div class="field">
+            <span class="sr-only" id="references-label">整形結果（編集可）</span>
+            <div id="references" class="ref-editor" role="group" aria-labelledby="references-label">
+              <p class="ref-empty">「整形 →」を押すと、再構成された文献リストがここに表示されます。原文と見比べて修正してください。</p>
+            </div>
+            <p class="ref-hint">各行が1件です。行末で <kbd>Enter</kbd> = 分割／行頭で <kbd>Backspace</kbd> = 前の行と結合。</p>
+          </div>
+          <div class="actions">
+            <button id="reclean" type="button" disabled>再整形</button>
+            <button id="run" type="button" disabled>チェック開始</button>
+          </div>
+        </div>
       </div>
 
       <p id="status" class="status">待機中</p>

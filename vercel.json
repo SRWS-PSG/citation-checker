@@ -3,6 +3,9 @@
   "functions": {
     "api/check.py": {
       "maxDuration": 60
+    },
+    "api/clean.py": {
+      "maxDuration": 15
     }
   }
 }
