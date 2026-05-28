@@ -11,8 +11,6 @@ import urllib.parse
 
 import requests
 
-logger = logging.getLogger(__name__)
-
 from .arxiv import ArxivClient, ArxivMatch
 from .budget import NO_BUDGET, TimeBudget
 from .doi_resolver import DOIResolver
@@ -36,6 +34,8 @@ from .scoring import (
     score_candidate,
     year_similarity,
 )
+
+logger = logging.getLogger(__name__)
 
 API = "https://api.crossref.org/works"
 RETRACTION_TYPES = {"retraction", "withdrawal", "removal", "partial_retraction"}
