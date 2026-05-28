@@ -78,6 +78,8 @@ python -m refaudit --input-file input/references.txt
 | `--all` | 正常な書誌も含めた全件レポートを出力 |
 | `--debug` | 候補不採用時の候補情報を多めに出す |
 | `--email EMAIL` | Crossref / PubMed 向けの連絡先メールアドレス |
+| `--pdf` / `--no-pdf` | 行番号付きPDFテキストのクリーニングを強制適用 / 自動検出を無効化 |
+| `--show-clean` | 再構成した参考文献リストを stdout に出力して終了（API照合なし） |
 | `--version` | バージョン表示 |
 
 入力は `--text` と `--input-file` が排他です。どちらも指定しない場合は stdin を読みます。
@@ -98,6 +100,23 @@ python -m refaudit --input-file input/references.txt
 - `@article`、`@book`、`@inproceedings` など主要エントリを自動検出
 - `author`、`title`、`year`、`doi`、`eprint` を使って照合
 - 特別なフラグは不要
+
+### 行番号付きPDFテキスト
+
+査読原稿などの PDF からコピペした、余白の行番号・ページフッターが紛れ込んだテキストにも対応します。
+
+- ページフッター（`Page 18 of 44`）、単語に癒着した行番号（`Eur J for Pers2 Cent`）を除去
+- ハイフンで行分割された語・URL を結合（`person-5 centred-care` → `person-centred-care`）
+- 文献番号（`28.` `29.` …）の連番で個々の書誌に再分割
+- フッター＋行番号列を検出して自動適用。`--pdf` で強制、`--no-pdf` で無効化
+- 誤クリーニング対策として、照合前に `--show-clean` で再構成結果を目視確認できる
+
+```bash
+# まず整形結果を確認
+citeguard --input-file manuscript_refs.txt --show-clean
+# 問題なければそのまま照合
+citeguard --input-file manuscript_refs.txt --out outputs/report.md
+```
 
 ```bash
 citeguard --input-file references.bib

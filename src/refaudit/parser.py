@@ -35,11 +35,26 @@ def detect_bibtex(text: str) -> bool:
     return bool(BIBTEX_ENTRY_REGEX.search(text or ""))
 
 
-def split_references(pasted_text: str) -> list[str]:
+def split_references(pasted_text: str, *, force_pdf: bool | None = None) -> list[str]:
+    """貼り付けテキストを文献ごとに分割する。
+
+    ``force_pdf`` で行番号付きPDFのクリーニングを制御する:
+    True=強制適用 / False=自動検出を無効化 / None=自動検出（既定）。
+    """
+    from .pdf_cleaner import detect_line_numbered_pdf, split_pdf_references
+
+    # --pdf 明示時は他の検出より優先してクリーニングする。
+    if force_pdf is True:
+        return split_pdf_references(pasted_text)
+
     # BibTeX形式を自動検出
     if detect_bibtex(pasted_text):
         from .bibtex_parser import load_bibtex_references
         return load_bibtex_references(pasted_text)
+
+    # 行番号付きPDFを自動検出（--no-pdf 指定時はスキップ）。
+    if force_pdf is None and detect_line_numbered_pdf(pasted_text):
+        return split_pdf_references(pasted_text)
 
     # シンプル：改行ごとに1書誌。空行と番号プレフィックス、明らかなラベル行を除去。
     refs: list[str] = []

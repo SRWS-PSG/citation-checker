@@ -6,13 +6,28 @@ import sys
 from . import __version__
 
 
-def run(text: str, out_path: pathlib.Path | None, show_all: bool = False, debug: bool = False) -> int:
-    from .crossref import CrossrefClient
+def run(
+    text: str,
+    out_path: pathlib.Path | None,
+    show_all: bool = False,
+    debug: bool = False,
+    force_pdf: bool | None = None,
+    show_clean: bool = False,
+) -> int:
     from .parser import split_references
+
+    refs = split_references(text, force_pdf=force_pdf)
+
+    # --show-clean: 再構成した文献リストを stdout に出して終了（API照合なし）。
+    if show_clean:
+        body = "".join(f"{i}. {ref}\n" for i, ref in enumerate(refs, 1))
+        sys.stdout.write(body)
+        return 0
+
+    from .crossref import CrossrefClient
     from .report import make_markdown_bad_only, make_markdown_full
 
     client = CrossrefClient(debug=debug, email=os.getenv("CONTACT_EMAIL"))
-    refs = split_references(text)
     results = [client.check_one(line) for line in refs]
     md = make_markdown_full(results) if show_all else make_markdown_bad_only(results)
     if out_path is not None:
@@ -41,6 +56,18 @@ def main() -> None:
     p.add_argument("--all", action="store_true", help="Include all references (not just problems).")
     p.add_argument("--debug", action="store_true", help="Show Crossref candidates for unmatched refs.")
     p.add_argument(
+        "--pdf", dest="force_pdf", action="store_true", default=None,
+        help="Force line-numbered PDF cleaning (footers, marginal line numbers).",
+    )
+    p.add_argument(
+        "--no-pdf", dest="force_pdf", action="store_false",
+        help="Disable automatic PDF cleaning detection.",
+    )
+    p.add_argument(
+        "--show-clean", action="store_true",
+        help="Print the reconstructed reference list to stdout and exit (no API calls).",
+    )
+    p.add_argument(
         "--email",
         help="Contact email for API etiquette (Crossref/PubMed). "
              "Alternatively set CONTACT_EMAIL env var or .env file.",
@@ -63,7 +90,13 @@ def main() -> None:
         text = sys.stdin.read()
 
     out = pathlib.Path(args.out) if args.out else None
-    sys.exit(run(text, out, show_all=args.all, debug=args.debug))
+    sys.exit(run(
+        text, out,
+        show_all=args.all,
+        debug=args.debug,
+        force_pdf=args.force_pdf,
+        show_clean=args.show_clean,
+    ))
 
 
 if __name__ == "__main__":
