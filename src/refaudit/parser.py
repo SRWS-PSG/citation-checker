@@ -75,6 +75,15 @@ def split_references(pasted_text: str, *, force_pdf: bool | None = None) -> list
         # 例: [1] , 1) , 1. などを剥がす
         line = re.sub(r"^\s*(\[\d+\]|\d+[\.\)]\s*)", "", line).strip()
         refs.append(line)
+
+    # 改行が失われた番号付きブロブ（"…doi: 10.x/y.2．Schön…"）へのフォールバック。
+    # 行分割で実質分割できていない場合のみ、連番マーカーによる分割を試す。
+    if len(refs) <= 2:
+        from .pdf_cleaner import split_numbered_blob
+
+        blob_refs = split_numbered_blob(pasted_text)
+        if len(blob_refs) > len(refs):
+            return blob_refs
     return refs
 
 

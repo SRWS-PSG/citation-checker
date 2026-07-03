@@ -38,6 +38,16 @@ _MIN_NEWLINES_FOR_BOUNDARY_MODE = 3
 # 直後は空白でも数字でもない文字（小文字姓 van der・引用符・括弧・非ASCIIを許容）。
 _REF_MARKER_REGEX = re.compile(r"(?<![\w.])(\d{1,3})\.[ \t]+(?=[^\s\d])")
 
+# 改行が失われた番号付きブロブ（"…doi: 10.x/y.2．Schön…"）のマーカー。
+# 全角「．」区切りを優先する: 本文中の半角ピリオド（DOI・ページ範囲・巻号）と
+# 衝突しないため誤検出が少ない。半角版は直前の "." を許す代わりに（DOI末尾に
+# 癒着した番号を拾うため）、連番チェックで境界を選別するベストエフォート。
+_ZEN_BLOB_MARKER_REGEX = re.compile(r"(?<![\d０-９])([0-9０-９]{1,3})．")
+_ASCII_BLOB_MARKER_REGEX = re.compile(r"(?<!\d)(\d{1,3})\.[ \t]*(?=[^\s\d])")
+_ZEN_DIGIT_TABLE = str.maketrans("０１２３４５６７８９", "0123456789")
+
+MIN_BLOB_REFS = 3  # 番号付きブロブとして分割するのに必要な連番マーカー数
+
 MIN_LINENUM_RUN = 6  # この長さ以上の行番号列が無ければクリーニングしない
 MIN_REF_BOUNDARIES = 3  # フッターが無い場合に必要な連番文献境界の数
 _MAX_LINENUM_VALUE = 60  # 1ページあたりの行数の上限目安
@@ -125,10 +135,60 @@ def _strip_references_heading(text: str) -> str:
     return re.sub(r"^\s*references\s*", "", text, flags=re.IGNORECASE).strip(" .,:;")
 
 
+def _numbered_blob_chain(text: str, regex: re.Pattern[str]) -> list[tuple[int, int, int]]:
+    """連番（1 or 2 始まり）に乗る番号マーカーの (start, end, value) 列を返す。"""
+    cands = [
+        (m.start(), m.end(), int(m.group(1).translate(_ZEN_DIGIT_TABLE)))
+        for m in regex.finditer(text)
+    ]
+    chain_idx = _longest_run([c[2] for c in cands], allow_reset=False)
+    chain = [cands[i] for i in chain_idx]
+    if len(chain) < MIN_BLOB_REFS or chain[0][2] > 2:
+        return []
+    return chain
+
+
+def split_numbered_blob(text: str) -> list[str]:
+    """改行が失われた番号付き文献リスト（"1．…2．…" / "1. …2. …"）を分割する。
+
+    連番マーカーだけを境界に採用する。全角「．」でチェーンが成立するなら
+    それを使い、半角ピリオドはフォールバック（ページ範囲 "1230-5." や
+    巻号 "23(1): 12." が期待値と一致してチェーンに乗り得るため）。
+    分割できない場合は空リストを返す。
+    """
+    text = (text or "").strip()
+    if not text:
+        return []
+    for regex in (_ZEN_BLOB_MARKER_REGEX, _ASCII_BLOB_MARKER_REGEX):
+        chain = _numbered_blob_chain(text, regex)
+        if chain:
+            break
+    else:
+        return []
+
+    refs: list[str] = []
+    lead = _strip_references_heading(text[: chain[0][0]])
+    if lead:
+        refs.append(lead)
+    for k, (_start, end, _value) in enumerate(chain):
+        seg_end = chain[k + 1][0] if k + 1 < len(chain) else len(text)
+        segment = re.sub(r"\s+", " ", text[end:seg_end]).strip(" .,:;　．，：；")
+        if segment:
+            refs.append(segment)
+    return refs
+
+
 def split_pdf_references(text: str) -> list[str]:
     """行番号付きPDFテキストを個々の文献文字列へ再構成する。"""
     cleaned = clean_pdf_text(text)
     boundaries = _reference_marker_chain(cleaned)
+
+    # 全角「．」区切りのブロブは _REF_MARKER_REGEX で境界を取れない
+    # （本文中の半角数字による弱い偽チェーンを拾うこともある）ため、
+    # ブロブ分割がより多くの文献を得るならそちらを採用する。
+    blob_refs = split_numbered_blob(cleaned)
+    if len(blob_refs) > len(boundaries) + 1:
+        return blob_refs
 
     if len(boundaries) < 2:
         # 連番の文献境界が確立できない場合は1ブロックとして返す。
