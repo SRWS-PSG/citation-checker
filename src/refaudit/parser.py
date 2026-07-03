@@ -72,8 +72,8 @@ def split_references(pasted_text: str, *, force_pdf: bool | None = None) -> list
             continue
         if line.lower() in skip_labels:
             continue
-        # 例: [1] , 1) , 1. などを剥がす
-        line = re.sub(r"^\s*(\[\d+\]|\d+[\.\)]\s*)", "", line).strip()
+        # 例: [1] , 1) , 1. , 1． , 1） などを剥がす（全角番号・区切りにも対応）
+        line = re.sub(r"^\s*(\[[0-9０-９]+\]|[0-9０-９]+[\.\)．）]\s*)", "", line).strip()
         refs.append(line)
 
     # 改行が失われた番号付きブロブ（"…doi: 10.x/y.2．Schön…"）へのフォールバック。

@@ -112,7 +112,9 @@ def author_overlap(input_authors: list[str], candidate_authors: list[str]) -> fl
     right = {normalize_author_name(author) for author in candidate_authors if normalize_author_name(author)}
     if not left or not right:
         return 0.0
-    return round(len(left & right) / max(len(left), len(right)), 3)
+    # 分母は入力著者数のみ（"et al." で末尾を省略した引用は、候補側に
+    # それ以上の共著者がいても不一致として扱わない）。
+    return round(len(left & right) / len(left), 3)
 
 
 def first_author_match(input_authors: list[str], candidate_authors: list[str]) -> float:
