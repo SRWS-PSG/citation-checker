@@ -151,9 +151,46 @@ def is_website_reference(text: str) -> bool:
     return False
 
 
+# APA style: "Author, A. A., & Author, B. B. (2019). Title. Journal, 1(2), 3-4."
+APA_HEAD_REGEX = re.compile(
+    r"^(?P<authors>.{3,500}?)\(\s*(?P<year>(?:19|20)\d{2})[a-z]?\s*\)\s*\.\s*(?P<rest>.+)$",
+    re.DOTALL,
+)
+APA_SENTENCE_SPLIT_REGEX = re.compile(r"(?<=[.?!])\s+")
+APA_VENUE_REGEX = re.compile(r"^(?P<venue>[^,]{2,120}),\s*\d")
+
+
+def _split_apa(ref_line: str) -> dict[str, str] | None:
+    """Split an APA-style reference into author / year / title / venue parts."""
+    head = APA_HEAD_REGEX.match(ref_line or "")
+    if not head:
+        return None
+    sentences = APA_SENTENCE_SPLIT_REGEX.split(head.group("rest").strip())
+    venue_index = next(
+        (i for i, s in enumerate(sentences) if i > 0 and APA_VENUE_REGEX.match(s)),
+        1,
+    )
+    title = " ".join(sentences[:venue_index]).strip().rstrip(".").strip()
+    if len(title) < 10:
+        return None
+    venue_match = APA_VENUE_REGEX.match(sentences[venue_index]) if (
+        venue_index < len(sentences)
+    ) else None
+    venue = venue_match.group("venue").strip(" ,.:;") if venue_match else ""
+    return {
+        "authors": head.group("authors").strip(),
+        "year": head.group("year"),
+        "title": title,
+        "venue": venue,
+    }
+
+
 def extract_title_candidate(ref_line: str) -> str | None:
     if not ref_line:
         return None
+    apa = _split_apa(_normalize_reference_line(ref_line))
+    if apa:
+        return apa["title"]
     parts = [p.strip() for p in ref_line.split(".")]
     parts = [p for p in parts if p]
     if not parts:
@@ -223,8 +260,10 @@ def _author_segment(ref_line: str) -> str:
 def extract_authors(ref_line: str) -> list[str]:
     if not ref_line:
         return []
+    return _authors_from_segment(_author_segment(ref_line))
 
-    author_segment = _author_segment(ref_line)
+
+def _authors_from_segment(author_segment: str) -> list[str]:
     if not author_segment:
         return []
 
@@ -300,13 +339,16 @@ def _extract_venue(ref_line: str, title: str | None) -> str | None:
 
 def parse_reference_metadata(ref_line: str) -> ReferenceRecord:
     normalized = _normalize_reference_line(ref_line)
+    apa = _split_apa(normalized)
     title = extract_title_candidate(normalized)
     if title:
         title = re.sub(r",\s*arxiv.*$", "", title, flags=re.IGNORECASE).strip(" ,.;:")
-    authors = extract_authors(normalized)
-    year = _extract_year(normalized)
+    authors = (
+        _authors_from_segment(apa["authors"]) if apa else extract_authors(normalized)
+    )
+    year = int(apa["year"]) if apa else _extract_year(normalized)
     volume, issue, page = _extract_volume_issue_page(normalized)
-    venue = _extract_venue(normalized, title)
+    venue = (apa["venue"] if apa else None) or _extract_venue(normalized, title)
     if "arxiv" in normalized.lower() and venue == "Available from":
         venue = "arXiv"
     article_number = _extract_article_number(page)
