@@ -20,7 +20,8 @@ keywords = ["citation", "reference", "crossref", "retraction", "audit", "pubmed"
 dependencies = [
     "requests>=2.32.0",
     "python-dotenv>=1.0.1",
-    "bibtexparser>=1.4.0",
+    # bibtexparser 2.x is a breaking API rewrite (loads() -> parse_string()); cap until ported.
+    "bibtexparser>=1.4.0,<2",
 ]
 
 [project.urls]
@@ -49,6 +50,11 @@ where = ["src"]
 
 [tool.ruff]
 line-length = 100
+
+[tool.ruff.lint]
+# Pin the rule set explicitly: ruff's implicit defaults widened in 0.16, so an
+# unpinned `ruff` in CI would otherwise change what counts as a lint failure.
+select = ["E4", "E7", "E9", "F"]
 
 [tool.ruff.lint.per-file-ignores]
 "api/check.py" = ["E402"]
