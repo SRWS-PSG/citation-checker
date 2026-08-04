@@ -6,6 +6,31 @@ import sys
 from . import __version__
 
 
+def write_stdout(text: str) -> None:
+    """Write to stdout, tolerating consoles that cannot encode every character.
+
+    Reports embed emoji (🚩 / ❌) and references carry arbitrary Unicode, both of
+    which raise UnicodeEncodeError on legacy codepages such as Windows cp932.
+    Fall back to the console's own encoding with replacement characters so that
+    Japanese text still renders and only the unencodable glyphs degrade to '?'.
+    """
+    try:
+        sys.stdout.write(text)
+        return
+    except UnicodeEncodeError:
+        pass
+
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        # Stream without a byte layer (e.g. captured stdout): degrade in-place.
+        sys.stdout.write(text.encode("ascii", errors="replace").decode("ascii"))
+        return
+
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    buffer.write(text.encode(encoding, errors="replace"))
+    buffer.flush()
+
+
 def run(
     text: str,
     out_path: pathlib.Path | None,
@@ -21,7 +46,7 @@ def run(
     # --show-clean: 再構成した文献リストを stdout に出して終了（API照合なし）。
     if show_clean:
         body = "".join(f"{i}. {ref}\n" for i, ref in enumerate(refs, 1))
-        sys.stdout.write(body)
+        write_stdout(body)
         return 0
 
     from .crossref import CrossrefClient
@@ -34,7 +59,7 @@ def run(
         out_path.parent.mkdir(parents=True, exist_ok=True)
         out_path.write_text(md, encoding="utf-8")
     else:
-        sys.stdout.write(md)
+        write_stdout(md)
     return 0
 
 
