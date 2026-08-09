@@ -151,9 +151,63 @@ def is_website_reference(text: str) -> bool:
     return False
 
 
+# APA style: "Author, A. A., & Author, B. B. (2019). Title. Journal, 1(2), 3-4."
+APA_HEAD_REGEX = re.compile(
+    r"^(?P<authors>.{3,500}?)\(\s*(?P<year>(?:19|20)\d{2})[a-z]?\s*\)\s*\.\s*(?P<rest>.+)$"
+)
+APA_SENTENCE_SPLIT_REGEX = re.compile(r"(?<=[.?!])\s+")
+APA_VENUE_REGEX = re.compile(r"^(?P<venue>[^,]{2,120}),\s*\d")
+# 著者イニシャル（"E."）を除いてもピリオド区切りの文が残るなら、その (year) は著者位置ではない
+# （"…outcomes. JAMA. (2019). 321(4):345-350." のように誌名や出版社の後に来た括弧年）。
+APA_AUTHOR_INITIAL_REGEX = re.compile(r"\b[A-Z]\.")
+APA_SENTENCE_IN_AUTHORS_REGEX = re.compile(r"\.\s+\S")
+# "321(4):345-350" のような巻号ページ断片をタイトルとして採用しないための語らしさ判定。
+APA_TITLE_WORD_REGEX = re.compile(r"[A-Za-z]{3,}|[\u3040-\u30ff\u3400-\u9fff]")
+
+
+def _split_apa(ref_line: str) -> dict[str, str] | None:
+    """Split an APA-style reference into author / year / title / venue parts."""
+    head = APA_HEAD_REGEX.match(ref_line or "")
+    if not head:
+        return None
+    authors = head.group("authors").strip()
+    if APA_SENTENCE_IN_AUTHORS_REGEX.search(APA_AUTHOR_INITIAL_REGEX.sub("", authors)):
+        return None
+    sentences = APA_SENTENCE_SPLIT_REGEX.split(head.group("rest").strip())
+    # タイトルは原則1文目。"?"/"!" で終わる見出し（"…Who are they? The EPOS study."）のときだけ、
+    # 掲載誌らしい文に当たるまで続きを取り込む。誌名の略記（"N. Engl. J. Med."）でも
+    # 文分割は起きるため、掲載誌を前方走査してその手前を全てタイトルにするのは避ける。
+    end = 1
+    while (
+        end < len(sentences)
+        and sentences[end - 1].rstrip().endswith(("?", "!"))
+        and not APA_VENUE_REGEX.match(sentences[end])
+    ):
+        end += 1
+    title = " ".join(sentences[:end]).strip().rstrip(".").strip()
+    if len(title) < 10 or not APA_TITLE_WORD_REGEX.search(title):
+        return None
+    venue_match = APA_VENUE_REGEX.match(sentences[end]) if end < len(sentences) else None
+    venue = venue_match.group("venue").strip(" ,.:;") if venue_match else ""
+    return {
+        "authors": authors,
+        "year": head.group("year"),
+        "title": title,
+        "venue": venue,
+    }
+
+
 def extract_title_candidate(ref_line: str) -> str | None:
     if not ref_line:
         return None
+    normalized = _normalize_reference_line(ref_line)
+    apa = _split_apa(normalized)
+    if apa:
+        return apa["title"]
+    return _title_from_segments(normalized)
+
+
+def _title_from_segments(ref_line: str) -> str | None:
     parts = [p.strip() for p in ref_line.split(".")]
     parts = [p for p in parts if p]
     if not parts:
@@ -223,8 +277,10 @@ def _author_segment(ref_line: str) -> str:
 def extract_authors(ref_line: str) -> list[str]:
     if not ref_line:
         return []
+    return _authors_from_segment(_author_segment(ref_line))
 
-    author_segment = _author_segment(ref_line)
+
+def _authors_from_segment(author_segment: str) -> list[str]:
     if not author_segment:
         return []
 
@@ -300,13 +356,16 @@ def _extract_venue(ref_line: str, title: str | None) -> str | None:
 
 def parse_reference_metadata(ref_line: str) -> ReferenceRecord:
     normalized = _normalize_reference_line(ref_line)
-    title = extract_title_candidate(normalized)
+    apa = _split_apa(normalized)
+    title = apa["title"] if apa else _title_from_segments(normalized)
     if title:
         title = re.sub(r",\s*arxiv.*$", "", title, flags=re.IGNORECASE).strip(" ,.;:")
-    authors = extract_authors(normalized)
-    year = _extract_year(normalized)
+    authors = (
+        _authors_from_segment(apa["authors"]) if apa else extract_authors(normalized)
+    )
+    year = int(apa["year"]) if apa else _extract_year(normalized)
     volume, issue, page = _extract_volume_issue_page(normalized)
-    venue = _extract_venue(normalized, title)
+    venue = (apa["venue"] if apa else None) or _extract_venue(normalized, title)
     if "arxiv" in normalized.lower() and venue == "Available from":
         venue = "arXiv"
     article_number = _extract_article_number(page)

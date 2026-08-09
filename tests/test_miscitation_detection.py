@@ -144,6 +144,77 @@ def test_extract_authors_handles_and_and_japanese_separator():
     assert extract_authors("松村千佳子・矢野義孝. 患者との医療コミュニケーションの重要性.") == ["松村", "矢野"]
 
 
+def test_parse_apa_reference():
+    record = parse_reference_metadata(
+        "Christodoulou, E., Peek, N., & Van Calster, B. (2019). A systematic review shows "
+        "no performance benefit of machine learning over logistic regression for clinical "
+        "prediction models. Journal of Clinical Epidemiology, 110, 12-22."
+    )
+    assert record.title == (
+        "A systematic review shows no performance benefit of machine learning over "
+        "logistic regression for clinical prediction models"
+    )
+    assert record.authors == ["christodoulou", "peek", "van"]
+    assert record.year == 2019
+    assert record.venue == "Journal of Clinical Epidemiology"
+    assert record.volume == "110"
+    assert record.page == "12-22"
+
+
+def test_parse_apa_reference_with_question_mark_title():
+    record = parse_reference_metadata(
+        "Mulder, M., & van Wegen, E. E. H. (2019). Prospectively classifying community "
+        "walkers after stroke: Who are they? Archives of Physical Medicine and "
+        "Rehabilitation, 100(11), 2113-2118."
+    )
+    assert record.title == "Prospectively classifying community walkers after stroke: Who are they?"
+    assert record.venue == "Archives of Physical Medicine and Rehabilitation"
+    assert record.issue == "11"
+
+
+def test_parse_apa_reference_keeps_subtitle_after_question_mark():
+    record = parse_reference_metadata(
+        "Veerbeek, J. M. (2011). Is accurate prediction of gait possible poststroke? "
+        "The EPOS study. Archives of Physical Medicine and Rehabilitation, 92(8), 1204-1210."
+    )
+    assert record.title == (
+        "Is accurate prediction of gait possible poststroke? The EPOS study"
+    )
+    assert record.venue == "Archives of Physical Medicine and Rehabilitation"
+
+
+def test_parenthesized_year_after_venue_is_not_treated_as_apa():
+    """"JAMA. (2019)." のような誌名後の括弧年でタイトルが巻号ページに化けない。"""
+    record = parse_reference_metadata(
+        "Smith J, Doe A. An important title about outcomes. JAMA. (2019). 321(4):345-350."
+    )
+    assert record.title == "An important title about outcomes"
+
+    record = parse_reference_metadata(
+        "Higgins JPT, Thomas J. Cochrane Handbook for Systematic Reviews. "
+        "Cochrane (2022). Version 6.3, chapter 10."
+    )
+    assert record.title == "Cochrane Handbook for Systematic Reviews"
+
+
+def test_parse_apa_reference_with_abbreviated_venue_keeps_title_clean():
+    """略記された誌名（"N. Engl. J. Med."）がタイトルに混入しない。"""
+    record = parse_reference_metadata(
+        "Smith, J. A. (2020). Deep learning for imaging. N. Engl. J. Med., 382, 1-9."
+    )
+    assert record.title == "Deep learning for imaging"
+
+
+def test_parse_apa_reference_japanese():
+    record = parse_reference_metadata(
+        "松村千佳子, 矢野義孝 (2019). 患者との医療コミュニケーションの重要性. "
+        "日本看護研究学会雑誌, 42(3), 123-130."
+    )
+    assert record.title == "患者との医療コミュニケーションの重要性"
+    assert record.venue == "日本看護研究学会雑誌"
+    assert record.year == 2019
+
+
 def test_parse_reference_metadata_extracts_core_fields():
     record = parse_reference_metadata(
         "Barteit S, Kyaw BM, Muller A, et al. The Effectiveness of Digital Game-Based Learning in Health Professions Education: Systematic Review and Meta-Analysis. JMIR Serious Games 2021; 9(3): e29080."
