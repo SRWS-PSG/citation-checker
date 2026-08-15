@@ -310,9 +310,27 @@ def _authors_from_segment(author_segment: str) -> list[str]:
     return authors
 
 
+YEAR_REGEX = re.compile(r"(?<!\d)((?:19|20)\d{2})(?!\d)")
+# Vancouver style: "J Clin Oncol 2021;39(19):2055-7" — year directly precedes the volume
+VANCOUVER_YEAR_REGEX = re.compile(r"(?<!\d)((?:19|20)\d{2})[a-z]?\s*[;:]\s*\d")
+
+
+def _is_locator_number(text: str, match: re.Match[str]) -> bool:
+    """True when a 4-digit number sits in a volume/issue/page slot rather than a year slot."""
+    prefix = text[: match.start()].rstrip()
+    return bool(prefix) and prefix[-1] in ":-–("
+
+
 def _extract_year(text: str) -> int | None:
-    years = re.findall(r"(?<!\d)((?:19|20)\d{2})(?!\d)", _normalize_reference_line(text))
-    return int(years[-1]) if years else None
+    normalized = _normalize_reference_line(text)
+    vancouver = VANCOUVER_YEAR_REGEX.search(normalized)
+    if vancouver:
+        return int(vancouver.group(1))
+    matches = list(YEAR_REGEX.finditer(normalized))
+    if not matches:
+        return None
+    outside_locators = [m for m in matches if not _is_locator_number(normalized, m)]
+    return int((outside_locators or matches)[-1].group(1))
 
 
 def _extract_volume_issue_page(text: str) -> tuple[str | None, str | None, str | None]:

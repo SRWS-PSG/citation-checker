@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from refaudit.crossref import CandidateMatch, CrossrefClient, MatchResult, SourceCollectionResult, _merge_records
 from refaudit.main import run
 from refaudit.parser import extract_authors, parse_reference_metadata
@@ -952,3 +954,24 @@ def test_report_includes_partial_verification_section():
     assert "検証未完了" in markdown
     assert "`pubmed`" in markdown
     assert "`jalc`=TimeoutError" in markdown
+
+
+@pytest.mark.parametrize(
+    "ref_line,expected_year",
+    [
+        (
+            "Dale W, Jacobsen PB, Mohile SG. Geriatric Oncology Comes of Age. "
+            "J Clin Oncol 2021;39(19):2055-7.",
+            2021,
+        ),
+        (
+            "Camp RL, Dolled-Filhart M, Rimm DL. X-tile. Clin Cancer Res 2004;10(21):7252-9.",
+            2004,
+        ),
+        ("Gupta RK. Systematic evaluation of prognostic models. Eur Respir J 2020;56(6).", 2020),
+        ("Li C. Guiding adjuvant radiotherapy. Front Oncol 2024;14:1480102.", 2024),
+        ("Smith J. Some title. Journal of Examples. 2019.", 2019),
+    ],
+)
+def test_vancouver_year_is_not_confused_with_page_numbers(ref_line, expected_year):
+    assert parse_reference_metadata(ref_line).year == expected_year
