@@ -205,6 +205,45 @@ def test_parse_apa_reference_with_abbreviated_venue_keeps_title_clean():
     assert record.title == "Deep learning for imaging"
 
 
+def test_parse_harvard_reference():
+    record = parse_reference_metadata(
+        "Hellyer, E., Nash, K., Jones, E., MacArthur, C., 2025. Postnatal depression beyond "
+        "12 months: a systematic review and meta-analysis. Int. J. Ment. Health Nurs. 34, "
+        "e70018. https://doi.org/10.1111/inm.70018"
+    )
+    assert record.title == (
+        "Postnatal depression beyond 12 months: a systematic review and meta-analysis"
+    )
+    assert record.authors == ["hellyer", "nash", "jones", "macarthur"]
+    assert record.year == 2025
+    assert record.venue == "Int. J. Ment. Health Nurs"
+    assert record.volume == "34"
+    assert record.page == "e70018"
+
+
+def test_parse_harvard_reference_with_parenthesized_venue():
+    record = parse_reference_metadata(
+        "Slomian, J., Honvo, G., Bruyere, O., 2019. Consequences of maternal postpartum "
+        "depression: a systematic review of maternal and infant outcomes. Womens Health "
+        "(Lond.) 15, 1745506519844044."
+    )
+    assert record.title == (
+        "Consequences of maternal postpartum depression: a systematic review of maternal "
+        "and infant outcomes"
+    )
+    assert record.venue == "Womens Health (Lond.)"
+
+
+def test_year_after_venue_is_not_treated_as_harvard():
+    """"JMIR Serious Games 2021; 9(3)" のような誌名後の年でタイトルが崩れない。"""
+    record = parse_reference_metadata(
+        "Barteit S, Kyaw BM, Muller A, et al. The Effectiveness of Digital Game-Based "
+        "Learning in Health Professions Education. JMIR Serious Games 2021; 9(3): e29080."
+    )
+    assert record.venue == "JMIR Serious Games"
+    assert record.year == 2021
+
+
 def test_parse_apa_reference_japanese():
     record = parse_reference_metadata(
         "松村千佳子, 矢野義孝 (2019). 患者との医療コミュニケーションの重要性. "
