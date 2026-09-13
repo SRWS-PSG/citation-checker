@@ -7,6 +7,9 @@ from .scoring import ReferenceRecord, normalize_author_name
 
 DOI_REGEX = re.compile(r"(10\.\d{4,9}/[^\s\"<>]+)", re.IGNORECASE)
 JAPANESE_CHAR_REGEX = re.compile(r"[\u3040-\u30ff\u3400-\u9fff]")
+# Sentence-splitting period: a period immediately followed by a digit (e.g. the
+# decimal point in "0.2%") is not treated as a sentence boundary.
+_SENTENCE_PERIOD_SPLIT_REGEX = re.compile(r"\.(?!\d)")
 
 # arXiv ID patterns:
 # New format: 2307.06464, 2307.06464v1, 2307.06464v2
@@ -164,6 +167,37 @@ APA_SENTENCE_IN_AUTHORS_REGEX = re.compile(r"\.\s+\S")
 # "321(4):345-350" のような巻号ページ断片をタイトルとして採用しないための語らしさ判定。
 APA_TITLE_WORD_REGEX = re.compile(r"[A-Za-z]{3,}|[\u3040-\u30ff\u3400-\u9fff]")
 
+# Colon-separated-author format (EndNote BMC/Vancouver output):
+# "Authors: Title. Journal Year, Vol(Issue):Pages." -- the author list is
+# immediately followed by a colon and then the title. This is only accepted when
+# the text before the colon structurally matches a comma-separated list of
+# "Surname Initials" tokens (optionally including "Jr." or "et al"), so that an
+# APA/Vancouver reference whose title happens to contain a colon (e.g.
+# "Smith J. COVID-19: a review. Lancet. 2020;1:1-2.") is never misdetected as
+# this colon-author format.
+_COLON_AUTHOR_NAME_TOKEN_REGEX = re.compile(
+    r"^(?:[^\W\d_]+(?:['\u2019-][^\W\d_]+)*\s+)+[A-Z]{1,4}\.?$"
+)
+_COLON_AUTHOR_SUFFIX_TOKEN_REGEX = re.compile(
+    r"^(?:Jr|Sr|2nd|3rd|4th|II|III|IV)\.?$", re.IGNORECASE
+)
+_COLON_AUTHOR_ET_AL_REGEX = re.compile(r"\s+et\s+al\.?\s*$", re.IGNORECASE)
+# Splits what follows the author colon (Title. Journal Year, Vol(Issue):Page.).
+# The venue is assumed not to contain periods (abbreviations with embedded
+# periods, e.g. "N. Engl. J. Med.", are out of scope). The title match is
+# non-greedy, so a decimal point such as in "0.2%" is not treated as a sentence
+# boundary unless it is followed by whitespace.
+COLON_AUTHOR_TAIL_REGEX = re.compile(
+    r"^(?P<title>.+?)\.\s+"
+    r"(?P<venue>[^.]+?)\s+"
+    r"(?P<year>(?:19|20)\d{2}),\s*"
+    r"(?P<volume>\d+)"
+    r"(?:\((?P<issue>[^)]+)\))?"
+    r"(?::(?P<page>[A-Za-z]*\d[\w-]*))?"
+    r"(?:;.*)?"
+    r"\.?\s*$"
+)
+
 
 def _split_apa(ref_line: str) -> dict[str, str] | None:
     """Split an APA-style reference into author / year / title / venue parts."""
@@ -197,6 +231,63 @@ def _split_apa(ref_line: str) -> dict[str, str] | None:
     }
 
 
+def _colon_author_name_tokens(authors_raw: str) -> list[str] | None:
+    """コロンより前の文字列を検査し、著者リストとして構造的に妥当なら姓+イニシャルの
+    トークン列を返す。妥当でなければ None（colon-author 形式ではないと判断する）。"""
+    text = _COLON_AUTHOR_ET_AL_REGEX.sub("", authors_raw.strip())
+    if not text:
+        return None
+    tokens = [t.strip() for t in text.split(",") if t.strip()]
+    if not tokens:
+        return None
+    names: list[str] = []
+    for tok in tokens:
+        if _COLON_AUTHOR_SUFFIX_TOKEN_REGEX.match(tok):
+            continue
+        if not _COLON_AUTHOR_NAME_TOKEN_REGEX.match(tok):
+            return None
+        names.append(tok)
+    return names or None
+
+
+def _authors_from_colon_name_tokens(name_tokens: list[str]) -> list[str]:
+    authors: list[str] = []
+    seen: set[str] = set()
+    for tok in name_tokens:
+        surname = tok.split()[0]
+        token = normalize_author_name(surname)
+        if token and token not in seen:
+            seen.add(token)
+            authors.append(token)
+    return authors
+
+
+def _split_colon_author(ref_line: str) -> dict[str, object] | None:
+    """"Authors: Title. Journal Year, Vol(Issue):Pages." 形式（EndNote BMC/Vancouver
+    出力）を著者/タイトル/誌名/年/巻/号/頁に分割する。形式に一致しなければ None。"""
+    colon_idx = ref_line.find(":")
+    if colon_idx <= 0:
+        return None
+    name_tokens = _colon_author_name_tokens(ref_line[:colon_idx])
+    if not name_tokens:
+        return None
+    tail = COLON_AUTHOR_TAIL_REGEX.match(ref_line[colon_idx + 1:].strip())
+    if not tail:
+        return None
+    title = tail.group("title").strip().rstrip(".").strip()
+    if len(title) < 3:
+        return None
+    return {
+        "name_tokens": name_tokens,
+        "title": title,
+        "venue": (tail.group("venue") or "").strip(" ,.:;") or None,
+        "year": tail.group("year"),
+        "volume": tail.group("volume"),
+        "issue": (tail.group("issue") or "").strip() or None,
+        "page": (tail.group("page") or "").strip() or None,
+    }
+
+
 def extract_title_candidate(ref_line: str) -> str | None:
     if not ref_line:
         return None
@@ -208,7 +299,9 @@ def extract_title_candidate(ref_line: str) -> str | None:
 
 
 def _title_from_segments(ref_line: str) -> str | None:
-    parts = [p.strip() for p in ref_line.split(".")]
+    # 小数点（"0.2%"、"2.5 mg" 等）ではピリオドの直後に数字が続くので、文の区切りとは
+    # 扱わない。単純な `split(".")` だと小数点でも割れてタイトルが断片化する。
+    parts = [p.strip() for p in _SENTENCE_PERIOD_SPLIT_REGEX.split(ref_line)]
     parts = [p for p in parts if p]
     if not parts:
         return None
@@ -356,16 +449,30 @@ def _extract_venue(ref_line: str, title: str | None) -> str | None:
 
 def parse_reference_metadata(ref_line: str) -> ReferenceRecord:
     normalized = _normalize_reference_line(ref_line)
-    apa = _split_apa(normalized)
-    title = apa["title"] if apa else _title_from_segments(normalized)
+    colon = _split_colon_author(normalized)
+    apa = _split_apa(normalized) if not colon else None
+    if colon:
+        title = colon["title"]
+        authors = _authors_from_colon_name_tokens(colon["name_tokens"])
+        year = int(colon["year"])
+        venue = colon["venue"]
+        volume, issue, page = colon["volume"], colon["issue"], colon["page"]
+    elif apa:
+        title = apa["title"]
+        authors = _authors_from_segment(apa["authors"])
+        year = int(apa["year"])
+        venue = apa["venue"]
+        volume, issue, page = _extract_volume_issue_page(normalized)
+    else:
+        title = _title_from_segments(normalized)
+        authors = extract_authors(normalized)
+        year = _extract_year(normalized)
+        venue = None
+        volume, issue, page = _extract_volume_issue_page(normalized)
+
     if title:
         title = re.sub(r",\s*arxiv.*$", "", title, flags=re.IGNORECASE).strip(" ,.;:")
-    authors = (
-        _authors_from_segment(apa["authors"]) if apa else extract_authors(normalized)
-    )
-    year = int(apa["year"]) if apa else _extract_year(normalized)
-    volume, issue, page = _extract_volume_issue_page(normalized)
-    venue = (apa["venue"] if apa else None) or _extract_venue(normalized, title)
+    venue = venue or _extract_venue(normalized, title)
     if "arxiv" in normalized.lower() and venue == "Available from":
         venue = "arXiv"
     article_number = _extract_article_number(page)

@@ -93,6 +93,7 @@ python -m refaudit --input-file input/references.txt
 - DOI を含む場合は DOI 解決を優先
 - `arXiv:2307.06464` や `2307.06464` のような arXiv ID も抽出
 - 日本語文献や `・` 区切り著者にも対応
+- EndNote の BMC/Vancouver 出力（`Authors: Title. Journal Year, Vol(Issue):Pages.` という、著者リストの直後にコロンでタイトルが続く形式）にも対応
 - URL主体の行やソフトウェア参照は `website` としてスキップ
 
 ### BibTeX
